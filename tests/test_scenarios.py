@@ -230,11 +230,14 @@ def test_scheduled_run_waits_for_send_time(env):
     assert len(tg.sent) == 1
 
 
-def test_local_copy_stands_down_when_cloud_is_active(env):
+def test_local_copy_stands_down_when_cloud_is_active(env, monkeypatch):
     mb, moodle, tg = env
     (mb.BASE_DIR / "CLOUD_ACTIVE").write_text("x")
     run(mb, "run", "--scheduled")
-    assert tg.sent == []
+    assert tg.sent == []                      # local (Mac) copy stays quiet
+    monkeypatch.setattr(mb, "IN_CLOUD", True)
+    run(mb, "run", "--scheduled")
+    assert len(tg.sent) == 1                  # the cloud copy ignores the marker
 
 
 def test_html_rejected_falls_back_to_plain_text(env):

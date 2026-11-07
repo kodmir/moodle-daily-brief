@@ -49,5 +49,6 @@ def mb(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "ARCHIVE_FILE", data / "archive.jsonl")
     monkeypatch.setattr(m, "BASE_DIR", tmp_path)
     m.MOODLE_TOKEN, m.TG_TOKEN, m.TG_CHAT = "test-token", "123:abc", "42"
+    monkeypatch.setattr(m, "IN_CLOUD", False)  # tests behave the same locally and in CI (GITHUB_ACTIONS=true)
     m.WARNINGS.clear()
     return m
