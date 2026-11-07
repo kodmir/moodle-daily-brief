@@ -1,0 +1,97 @@
+name: Morning brief
+
+# Runs the brief in the cloud so your computer doesn't need to be on.
+# GitHub's own scheduler can be late or (on new repos) silent; for an exact time, trigger
+# this workflow from an external scheduler (e.g. cron-job.org) — see README.
+on:
+  schedule:
+    # GitHub cron is UTC (Turkey = UTC+3). 04:07 UTC = 07:07 TRT. Later slots are fallbacks;
+    # the script sends at most ONE brief per day.
+    - cron: "7 4 * * *"
+    - cron: "37 4 * * *"
+    - cron: "7 6 * * *"
+    - cron: "7 8 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "force = send now, scheduled = send only if today's brief wasn't sent yet"
+        required: false
+        default: force
+
+permissions:
+  contents: write   # to commit the bot's state (data/) back to YOUR PRIVATE repo
+
+concurrency:
+  group: moodle-brief
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Safety: the bot commits your Moodle announcements to data/. In a PUBLIC repo that would
+      # publish them, so it refuses to run there. Use "Use this template" → Private.
+      - name: Safety check (private repo + configured)
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HAS_SECRETS: ${{ secrets.BRIEF_SECRETS != '' || secrets.MOODLE_TOKEN != '' }}
+        run: |
+          private=$(gh api "repos/${{ github.repository }}" --jq .private)
+          if [ "$private" != "true" ]; then
+            echo "::warning::This repository is public. The brief only runs in a PRIVATE copy (your Moodle data would be published otherwise)."
+            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$HAS_SECRETS" != "true" ]; then
+            echo "::notice::Not configured yet: add the BRIEF_SECRETS secret (see README)."
+            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.ok == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.ok == 'true'
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - if: steps.guard.outputs.ok == 'true'
+        run: pip install -r requirements.txt
+
+      - name: Build and send the brief
+        if: steps.guard.outputs.ok == 'true'
+        env:
+          MOODLE_URL: ${{ vars.MOODLE_URL || 'https://moodle.bogazici.edu.tr' }}
+          # All settings in one secret, one per line:
+          #   moodle_token: ...
+          #   telegram_bot_token: ...
+          #   telegram_chat_id: ...
+          BRIEF_SECRETS: ${{ secrets.BRIEF_SECRETS }}
+          # Optional: separate secrets (take precedence if set)
+          MOODLE_TOKEN: ${{ secrets.MOODLE_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SEND_TIME: ${{ vars.SEND_TIME || '07:00' }}
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ] && [ "${{ inputs.mode }}" != "scheduled" ]; then
+            python moodle_brief.py run --force
+          else
+            python moodle_brief.py run --scheduled
+          fi
+
+      - name: Save state (append-only; nothing is ever deleted)
+        if: always() && steps.guard.outputs.ok == 'true'
+        run: |
+          git config user.name "moodle-brief-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data/
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "state: $(TZ=Europe/Istanbul date '+%Y-%m-%d %H:%M')"
+            git pull --rebase --autostash || true
+            git push
+          fi

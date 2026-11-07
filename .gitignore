@@ -1,0 +1,9 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/run.lock
+data/launchd.log
+data/*.tmp
+CLOUD_ACTIVE
