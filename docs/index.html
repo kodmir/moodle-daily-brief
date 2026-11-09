@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moodle Brief — her sabah dersinin özeti</title>
+<meta name="description" content="Her sabah Moodle'daki teslimlerini, sınavlarını ve yeni duyurularını telefonuna bildirim olarak gönderir. Her şey senin telefonunda çalışır; hiçbir veri kimseye gitmez.">
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --fg:#14161a; --dim:#5b6472; --line:#e5e8ec;
+    --accent:#0a66ff; --accent-fg:#fff; --ok:#1a7f45; --warn:#b4690e; --code:#f0f2f5;
+    --radius:16px;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0d0f12; --card:#16191e; --fg:#eef1f5; --dim:#9aa4b2; --line:#262b32;
+      --accent:#4c8dff; --accent-fg:#06101f; --ok:#4ccb84; --warn:#e3a44a; --code:#1b1f25;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0d0f12; --card:#16191e; --fg:#eef1f5; --dim:#9aa4b2; --line:#262b32;
+    --accent:#4c8dff; --accent-fg:#06101f; --ok:#4ccb84; --warn:#e3a44a; --code:#1b1f25;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.55; padding:0 16px; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:640px; margin:0 auto}
+  header{padding:56px 0 20px; text-align:center}
+  .logo{font-size:44px; line-height:1}
+  h1{font-size:30px; margin:14px 0 6px; letter-spacing:-.02em}
+  .tag{color:var(--dim); font-size:17px; margin:0 auto; max-width:30em}
+  .badge{display:inline-flex; gap:6px; align-items:center; margin-top:16px; padding:6px 12px;
+    background:var(--card); border:1px solid var(--line); border-radius:999px; font-size:13px; color:var(--ok)}
+  section{background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    padding:22px; margin:16px 0}
+  h2{font-size:20px; margin:0 0 4px; letter-spacing:-.01em}
+  h2 .n{display:inline-grid; place-items:center; width:26px; height:26px; margin-right:9px;
+    background:var(--accent); color:var(--accent-fg); border-radius:8px; font-size:15px; vertical-align:2px}
+  .sub{color:var(--dim); font-size:14px; margin:0 0 14px}
+  ol{margin:0; padding-left:20px} ol li{margin:9px 0}
+  ul.plain{list-style:none; margin:10px 0 0; padding:0}
+  ul.plain li{display:flex; gap:10px; margin:9px 0; align-items:flex-start}
+  ul.plain .i{flex:none; width:22px; text-align:center}
+  .btn{display:block; width:100%; border:0; cursor:pointer; text-align:center;
+    background:var(--accent); color:var(--accent-fg); font-size:17px; font-weight:600;
+    padding:15px 18px; border-radius:12px; margin:4px 0 2px; font-family:inherit; transition:transform .05s}
+  .btn:active{transform:scale(.99)}
+  .btn.sec{background:transparent; color:var(--accent); border:1.5px solid var(--line)}
+  .note{font-size:13px; color:var(--dim); margin:10px 0 0}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--code);
+    padding:2px 6px; border-radius:6px; font-size:.9em; word-break:break-all}
+  .steps-after{margin-top:16px}
+  a{color:var(--accent)}
+  .preview{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; line-height:1.7;
+    background:var(--code); border-radius:12px; padding:16px; white-space:pre-wrap; color:var(--fg); margin:0}
+  .preview .warn{color:var(--warn)} .preview .dim{color:var(--dim)} .preview b{color:var(--accent)}
+  footer{text-align:center; color:var(--dim); font-size:13px; padding:28px 0 60px}
+  footer a{color:var(--dim)}
+  .toast{position:fixed; left:50%; bottom:28px; transform:translateX(-50%) translateY(20px);
+    background:var(--fg); color:var(--bg); padding:12px 20px; border-radius:999px; font-size:15px;
+    font-weight:600; opacity:0; pointer-events:none; transition:.25s; z-index:9}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+  details{margin-top:12px} summary{cursor:pointer; font-weight:600; font-size:15px}
+  details p, details ol{font-size:14.5px; color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="logo">🎓</div>
+    <h1>Moodle Brief</h1>
+    <p class="tag">Her sabah Moodle'daki bugünkü teslimlerin, haftanın sınavları ve yeni duyurular telefonuna bildirim olarak gelir.</p>
+    <span class="badge">🔒 Her şey senin telefonunda · hiçbir veri kimseye gitmez</span>
+  </header>
+
+  <section>
+    <h2>Ne işe yarar?</h2>
+    <ul class="plain">
+      <li><span class="i">📌</span><span><b>Bugün ve bu hafta:</b> teslim tarihleri, quizler, etkinlikler tek bakışta.</span></li>
+      <li><span class="i">🎯</span><span><b>En yakın sınavlar:</b> duyuruya gömülü ya da sonradan değişen tarihleri de yakalar, uyarır.</span></li>
+      <li><span class="i">📣</span><span><b>Yeni duyurular:</b> hoca bir şey paylaşır paylaşmaz anlık bildirim.</span></li>
+      <li><span class="i">🏠</span><span><b>Ana ekran widget'ı:</b> en yakın sınavlar hep gözünün önünde.</span></li>
+    </ul>
+    <p class="preview"><b>☀️ 9 Kas Pazartesi</b>
+
+🎯 <b>SINAVLAR</b>
+• IE202 Ara sınav ❔ · 17 Kas Sal 17:00 (8 gün)
+   <span class="warn">⚠️ tarih değişti (eskisi 11 Kas)</span>
+
+📅 <b>BU HAFTA</b>
+• AD216 Take-home · 11 Kas Çar 23:59
+<span class="dim">❔ = duyuru metninden okundu, teyit et</span></p>
+  </section>
+
+  <section>
+    <h2><span class="n">1</span>Scriptable'ı indir</h2>
+    <p class="sub">Apple'ın ücretsiz uygulaması. Bildirimleri bu gönderecek.</p>
+    <a class="btn" href="https://apps.apple.com/app/scriptable/id1405459188" target="_blank" rel="noopener">App Store'da aç →</a>
+    <p class="note">İndirdikten sonra bir kez açıp kapat (kendi klasörünü oluştursun).</p>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>Kodu kopyala</h2>
+    <p class="sub">Butona bas; Moodle Brief'in kodu panona kopyalanır.</p>
+    <button class="btn" id="copyBtn">📋 Kodu kopyala</button>
+    <a class="btn sec" id="rawLink" href="moodle-brief.js" target="_blank" rel="noopener">Kodu ayrı sayfada aç</a>
+    <p class="note">Kopyala çalışmazsa yukarıdaki bağlantıyı aç, metnin tümünü seçip kopyala.</p>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>Scriptable'a yapıştır ve bağlan</h2>
+    <ol>
+      <li>Scriptable'da sağ üstteki <b>+</b> ile yeni bir betik aç.</li>
+      <li>Boş alana uzun bas → <b>Yapıştır</b>.</li>
+      <li>Üstteki isme dokunup adını <b>Moodle Brief</b> yap.</li>
+      <li>Sağ alttaki <b>▶</b> ile çalıştır → <b>“Okul hesabınla bağlan”</b> → kendi Boğaziçi/Busign hesabınla gir → <b>Bağlandı</b> yazınca Close.</li>
+      <li>Bildirim izni sorarsa <b>İzin Ver</b>.</li>
+    </ol>
+    <div class="steps-after">
+      <details>
+        <summary>Ana ekran widget'ı ekle (önerilir)</summary>
+        <ol>
+          <li>Ana ekranda boş yere uzun bas → sol üst <b>+</b> → <b>Scriptable</b>.</li>
+          <li>Orta boyutu seç → <b>Widget Ekle</b>.</li>
+          <li>Widget'a uzun bas → <b>Widget'ı Düzenle</b> → Script: <b>Moodle Brief</b>, When Interacting: <b>Run Script</b>.</li>
+        </ol>
+        <p>Widget, bildirimin her sabah güncel veriyle gelmesini sağlar.</p>
+      </details>
+      <details>
+        <summary>Sabah bildirimini tam saatinde al (isteğe bağlı)</summary>
+        <p>Scriptable'da brifingi açıp alttaki <b>⚙️ Ayarlar → “Sabah bildirimini tam saatinde almak”</b> adımlarını izle. Bir kez Kestirmeler otomasyonu kurulur.</p>
+      </details>
+    </div>
+  </section>
+
+  <section>
+    <h2>Android ya da bilgisayar</h2>
+    <p class="sub">Scriptable sadece iPhone'da çalışır. Diğer herkes için kendi kopyanı GitHub'da ücretsiz çalıştırabilirsin (Telegram'a bildirim).</p>
+    <a class="btn sec" href="https://github.com/kodmir/moodle-daily-brief" target="_blank" rel="noopener">GitHub şablonunu aç →</a>
+  </section>
+
+  <section>
+    <h2>Gizlilik</h2>
+    <ul class="plain">
+      <li><span class="i">🔒</span><span>Giriş <b>Moodle'ın kendi sayfasında</b> (Busign) yapılır. Şifreni ne bu site ne de betik görür.</span></li>
+      <li><span class="i">📱</span><span>Moodle'ın verdiği anahtar ve tüm veriler <b>yalnızca senin telefonunda</b> durur. Hiçbir sunucuya gitmez.</span></li>
+      <li><span class="i">🧾</span><span>Kodun tamamı açık. <a href="https://github.com/kodmir/moodle-daily-brief" target="_blank" rel="noopener">GitHub'da inceleyebilirsin.</a></span></li>
+    </ul>
+  </section>
+
+  <footer>
+    Moodle Brief · açık kaynak (MIT)<br>
+    Boğaziçi öğrencileri için yapıldı · resmî bir üniversite uygulaması değildir
+  </footer>
+</div>
+
+<div class="toast" id="toast">Kopyalandı ✓</div>
+
+<script>
+  const toast = (msg) => {
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 1900);
+  };
+  document.getElementById('copyBtn').addEventListener('click', async () => {
+    try {
+      const res = await fetch('moodle-brief.js', {cache: 'no-store'});
+      if (!res.ok) throw new Error('fetch');
+      const code = await res.text();
+      await navigator.clipboard.writeText(code);
+      toast('Kopyalandı ✓ — şimdi Scriptable’a yapıştır');
+    } catch (e) {
+      toast('Kopyalanamadı — “Kodu ayrı sayfada aç”ı kullan');
+    }
+  });
+</script>
+</body>
+</html>
