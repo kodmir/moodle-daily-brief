@@ -24,6 +24,11 @@ class FakeMoodle:
         self.posts = [(101, 1, "Midterm", "The IE202 midterm will be held on November 17 at 17:00.", NOW - 5 * DAY)]
         self.replies = {}           # discussion id -> list of (post id, text, created)
         self.post_calls = 0
+        self.modules = []           # extra course modules for course 1
+        self.assignments = []       # (id, name, duedate) for course 1
+        self.calendar = []          # (id, name, timestart) for course 1
+        self.grades = {}            # course id -> list of grade items
+        self.grades_disabled = False
 
     def __call__(self, fn, **p):
         mb = self.mb
@@ -38,9 +43,21 @@ class FakeMoodle:
         if fn == "core_course_get_contents":
             if self.mode == "partial":
                 raise mb.MoodleError("core_course_get_contents: nopermission")
-            return [{"id": 1, "summary": "", "modules": [
-                {"id": 900 + p["courseid"], "modname": "feedback", "name": "Survey",
-                 "dates": [{"label": "Opens:", "timestamp": NOW + DAY}, {"label": "Closes:", "timestamp": NOW + 2 * DAY}]}]}]
+            mods = [{"id": 900 + p["courseid"], "modname": "feedback", "name": "Survey",
+                     "dates": [{"label": "Opens:", "timestamp": NOW + DAY}, {"label": "Closes:", "timestamp": NOW + 2 * DAY}]}]
+            if p["courseid"] == 1:
+                mods += self.modules
+            return [{"id": 1, "summary": "", "modules": mods}]
+        if fn == "mod_assign_get_assignments":
+            return {"courses": [{"id": 1, "assignments": [{"id": i, "name": n, "duedate": d, "intro": ""}
+                                                          for i, n, d in self.assignments]}]}
+        if fn == "core_calendar_get_calendar_events":
+            return {"events": [{"id": i, "name": n, "courseid": 1, "timestart": t, "modulename": "assign", "description": ""}
+                               for i, n, t in self.calendar]}
+        if fn == "gradereport_user_get_grade_items":
+            if self.grades_disabled:
+                raise mb.MoodleError("gradereport_user_get_grade_items: nopermission")
+            return {"usergrades": [{"gradeitems": self.grades.get(p["courseid"], [])}]}
         if fn == "mod_forum_get_forums_by_courses":
             return [{"id": 50 + c["id"], "course": c["id"], "type": "news"} for c in self.courses]
         if fn == "mod_forum_get_forum_discussions":
@@ -305,3 +322,98 @@ def test_course_short_names(mb):
 def test_titles_are_unescaped_once(mb):
     it = mb.mk("k", "x", "IE306", "Class &amp; Seating Plan")
     assert it["title"] == "Class & Seating Plan" and mb.E(it["title"]) == "Class &amp; Seating Plan"
+
+
+# ---------------------------------------------------------------- v1.1: grades, de-duplication, "what changed"
+
+def other_lines(msg):
+    """Lines of the 'DİĞER' section."""
+    part = plain(msg).split("DİĞER", 1)
+    return [l for l in part[1].split("\n")[1:] if l.startswith("•")] if len(part) > 1 else []
+
+
+def test_same_thing_is_listed_once(env):
+    mb, moodle, tg = env
+    run(mb, "run")
+    due = NOW + 3 * DAY
+    # one upload = resource module + its file; one assignment = module + assignment API + calendar entry
+    moodle.modules = [
+        {"id": 700, "modname": "resource", "name": "Answers to 4th Exercise",
+         "contents": [{"type": "file", "filename": "answers.docx", "filepath": "/", "filesize": 10, "timemodified": NOW}]},
+        {"id": 701, "modname": "assign", "name": "Homework 5", "dates": [{"label": "Due:", "timestamp": due}]},
+        {"id": 702, "modname": "folder", "name": "Problem Sets", "contents": [
+            {"type": "file", "filename": "PS7.pdf", "filepath": "/", "filesize": 1, "timemodified": NOW},
+            {"type": "file", "filename": "PS8.pdf", "filepath": "/", "filesize": 1, "timemodified": NOW}]},
+    ]
+    moodle.assignments = [(55, "Homework 5", due)]
+    moodle.calendar = [(66, "Homework 5 is due", due)]
+    new_day(mb)
+    run(mb, "run", "--force")
+    lines = other_lines(tg.last)
+    assert sum("Answers to 4th Exercise" in l for l in lines) == 1
+    assert sum("Homework 5" in l for l in lines) == 1
+    assert any("ödev: Homework 5" in l for l in lines)                 # the assignment wins over module/calendar
+    assert sum("Problem Sets" in l for l in lines) == 2                # two different files stay separate
+    assert not any("etkinlik (" in l for l in lines)                   # readable type names
+
+
+def test_update_shows_what_changed(env):
+    mb, moodle, tg = env
+    label = {"id": 710, "modname": "label", "name": "Recordings",
+             "description": "<p>Recordings</p><p>(ENG) R1 R2 R3 R4 R5 R6 R7</p><p>(TUR) R1 R2 R3 R4 R5 R6 R7</p>"}
+    moodle.modules = [label]
+    run(mb, "run")
+    label["description"] = "<p>Recordings</p><p>(ENG) R1 R2 R3 R4 R5 R6 R7 R8</p><p>(TUR) R1 R2 R3 R4 R5 R6 R7 R8</p>"
+    new_day(mb)
+    run(mb, "run", "--force")
+    line = [l for l in other_lines(tg.last) if "Recordings" in l][0]
+    assert "+ R8" in line and "sayfa metni" in line and "güncellendi" not in line
+
+
+def test_label_titles_are_shortened(mb):
+    it = {"kind": "etkinlik (label)", "title": "Recordings(ENG) R1 R2 R3 R4 R5 R6 R7 R8(TUR) R1 R2..."}
+    assert mb.short_title(it) == "Recordings"
+    assert mb.short_title({"kind": "etkinlik (label)", "title": "PS Schedule: Mondays and Thursdays"}) == "PS Schedule"
+    assert mb.short_title({"kind": "dosya", "title": "Problem Sets / PS7.pdf"}) == "Problem Sets / PS7.pdf"
+
+
+def test_diff_summary(mb):
+    old = "PS6: Monday (cancelled)\nThursday 15-17 at EF106"
+    assert mb.diff_summary(old, "PS7: Monday (cancelled)\nThursday 15-17 at EF106") == "PS7: Monday (cancelled)"
+    assert mb.diff_summary("a line here", "a line here") == ""
+    assert mb.diff_summary(None, "x") == ""
+    assert mb.diff_summary("Room: M1100 and", "Room: M1100 and M1170") == "+ M1170"
+
+
+def grade(i, name, raw, graded, mx=100, fb=""):
+    return {"id": i, "itemname": name, "itemtype": "mod", "graderaw": raw, "gradeformatted": f"{raw:.2f}",
+            "grademax": mx, "feedback": fb, "gradedategraded": graded}
+
+
+def test_new_grade_is_reported_but_old_grades_do_not_flood(env):
+    mb, moodle, tg = env
+    run(mb, "run")                                                     # state exists, no grades tracked yet
+    moodle.grades = {1: [grade(1, "Quiz 1", 70, NOW - 20 * DAY), grade(2, "Quiz 2", 85, NOW - 3600, fb="<p>Well done</p>"),
+                         {"id": 3, "itemname": "Final", "itemtype": "mod", "graderaw": None},
+                         {"id": 4, "itemname": "Course total", "itemtype": "course", "graderaw": 77.5}]}
+    new_day(mb)
+    run(mb, "run", "--force")
+    msg = plain(tg.last)
+    assert "YENİ NOTLAR (1)" in msg and "IE202 Quiz 2: 85/100" in msg and "Well done" in msg
+    assert "Quiz 1" not in msg and "Course total" not in msg           # old grade and totals stay quiet
+    moodle.grades[1][0] = grade(1, "Quiz 1", 75, NOW - 60)             # an objection changed the grade
+    new_day(mb)
+    run(mb, "run", "--force")
+    assert "IE202 Quiz 1: 75/100 (değişti)" in plain(tg.last)
+
+
+def test_grades_api_disabled_is_harmless(env):
+    mb, moodle, tg = env
+    moodle.grades_disabled = True
+    assert run(mb, "run") == 0 and "17 Kas" in tg.last
+
+
+def test_grade_formatting(mb):
+    assert mb.fmt_grade({"gradeformatted": "85.00", "graderaw": 85, "grademax": 100}) == "85/100"
+    assert mb.fmt_grade({"gradeformatted": "8,50", "graderaw": 8.5, "grademax": 10}) == "8.5/10"
+    assert mb.fmt_grade({"gradeformatted": "BA", "graderaw": 3.5, "grademax": 4}) == "BA"

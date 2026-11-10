@@ -10,7 +10,7 @@
 // Kayıtlar asla silinmez; eskiyen ya da Moodle'dan kalkan öğeler sadece gösterilmez.
 // ------------------------------------------------------------------------------------------
 
-const VERSION = "1.0.0"
+const VERSION = "1.1.0"
 const DEFAULT_URL = "https://moodle.bogazici.edu.tr"
 const KC_TOKEN = "moodlebrief.token"
 const KC_URL = "moodlebrief.url"
@@ -134,6 +134,16 @@ function mk(key, kind, course, title, text = "", t = null, version = null, url =
 function structEv(course, title, type, ts, source) {
   const d = new Date(ts * 1000)
   return { course, title, type, date: ymd(d), time: hm(d), certainty: "exact", source }
+}
+
+// Not öğesini "85/100" gibi yazar; harf notu ise olduğu gibi bırakır
+function fmtGrade(g) {
+  const has = g.gradeformatted !== null && g.gradeformatted !== undefined && g.gradeformatted !== ""
+  const val = String(has ? g.gradeformatted : g.graderaw).trim()
+  const n = Number(val.replace(",", "."))
+  if (val === "" || Number.isNaN(n)) return val
+  const num = String(parseFloat(n.toFixed(2))), mx = Number(g.grademax)
+  return mx ? `${num}/${parseFloat(mx.toFixed(2))}` : num
 }
 
 async function collect(base, token, replyCache) {
@@ -279,6 +289,17 @@ async function collect(base, token, replyCache) {
   for (const n of arr(nt.notifications)) {
     const body = n.smallmessage || htmlToText(n.fullmessagehtml) || n.fullmessage || ""
     items.push(mk(`notif:${n.id}`, "bildirim", "Bildirim", n.subject, body, n.timecreated, "1", n.contexturl || ""))
+  }
+
+  // 7) notlar (hoca not girdiğinde / değiştirdiğinde)
+  for (const c of courses) {
+    const gr = await tryCall(base, token, "gradereport_user_get_grade_items", { courseid: c.id, userid: info.userid }, {}) || {}
+    for (const ug of arr(gr.usergrades)) for (const g of arr(ug.gradeitems)) {
+      if (g.itemtype !== "mod" || g.graderaw === null || g.graderaw === undefined) continue
+      const fb = htmlToText(g.feedback)
+      items.push(mk(`grade:${c.id}:${g.id}`, "not", cname[c.id], g.itemname || "Not", fmtGrade(g) + (fb ? "\n" + fb : ""),
+        g.gradedategraded || g.gradedatesubmitted || null, hash(g.graderaw, fb), "", null, false))
+    }
   }
 
   const uniq = {}
@@ -484,7 +505,7 @@ function regexDates(text, posted = null, title = "") {
 function freeExtract(it) {
   if (it.file) return { summary: `Dosya: ${it.file.name}`, importance: "low", events: [] }
   const relOk = ["duyuru", "forum", "duyuru cevabı", "forum cevabı", "mesaj", "bildirim"].includes(it.kind)
-  const events = it.kind !== "takvim" ? regexDates(it.text || "", relOk ? it.time : null, it.title || "") : []
+  const events = !["takvim", "not"].includes(it.kind) ? regexDates(it.text || "", relOk ? it.time : null, it.title || "") : []
   return { summary: String(it.text || "").replace(/\s+/g, " ").trim().slice(0, 160), events }
 }
 
@@ -583,10 +604,45 @@ function archive(lines) {
   fm.writeString(p, old + lines.map(l => JSON.stringify(l)).join("\n") + "\n")
 }
 
-// Moodle'dan gelen veriyi kayıtlara işle; yeni duyuruları döndür
+// Güncellenen bir metinde NE değişti: eklenen satırlar; satırın sadece sonu uzadıysa eklenen kısım
+function diffSummary(oldText, newText, limit = 110) {
+  if (!oldText || !newText) return ""
+  const skip = /^(Gönderen|Tarih|Son teslim|Açılış|Kapanış):/
+  const oldLines = String(oldText).split("\n").map(l => l.trim()).filter(Boolean)
+  const oldSet = new Set(oldLines), out = []
+  for (const raw of String(newText).split("\n")) {
+    const l = raw.trim()
+    if (!l || oldSet.has(l) || skip.test(l)) continue
+    const pre = oldLines.filter(o => l.startsWith(o)).sort((a, b) => b.length - a.length)[0] || ""
+    let piece = pre.length >= 6 ? "+ " + l.slice(pre.length).trim() : l
+    if (piece.length > 80) piece = piece.slice(0, 77) + "…"
+    if (!out.includes(piece)) out.push(piece)
+    if (out.length === 2) break
+  }
+  const res = out.join(" · ")
+  return res.length <= limit ? res : res.slice(0, limit - 1) + "…"
+}
+let archiveCache = null
+function archiveLastText(key) {       // bir öğenin arşivdeki son (yani önceki) sürümünün metni
+  if (!archiveCache) {
+    archiveCache = {}
+    try {
+      const p = fm.joinPath(dir(), "archive.jsonl")
+      if (fm.fileExists(p)) for (const line of fm.readString(p).split("\n")) {
+        if (!line) continue
+        try { const r = JSON.parse(line); archiveCache[r.key] = r.text || "" } catch (e) {}
+      }
+    } catch (e) {}
+  }
+  return archiveCache[key]
+}
+
+// Moodle'dan gelen veriyi kayıtlara işle; yeni duyuruları ve notları döndür
 function ingest(st, data) {
   const nowTs = Math.floor(now() / 1000), first = Object.keys(st.seen).length === 0
   const fresh = [], arch = []
+  const gradesKnown = Object.keys(st.seen).some(k => k.startsWith("grade:"))
+  archiveCache = null
   for (const it of data.items) {
     const prev = st.seen[it.key]
     if (prev !== it.version) {
@@ -594,14 +650,22 @@ function ingest(st, data) {
       const ex = freeExtract(it)
       ex.course = it.course; ex.title = it.title; ex.kind = it.kind; ex.url = it.url
       ex.posted = it.time || 0; ex.version = it.version
-      ex.text = it.kind.startsWith("duyuru") || it.kind === "bildirim" ? it.text : undefined
+      ex.text = it.file ? undefined : String(it.text || "").slice(0, 2000)
       ex.previous_versions = (old && old.previous_versions) || []
-      if (old && old.version !== it.version) ex.previous_versions.push({ version: old.version, events: old.events, replaced_at: nowTs })
+      if (old && old.version !== it.version) {
+        ex.previous_versions.push({ version: old.version, events: old.events, replaced_at: nowTs })
+        if (!it.file) {
+          const chg = diffSummary(typeof old.text === "string" ? old.text : archiveLastText(it.key), it.text)
+          if (chg) ex.change = chg
+        }
+      }
       st.extracted[it.key] = ex
-      st.firstSeen[it.key] = { t: first ? (it.time || 0) : nowTs, updated: Boolean(prev) && !first }
+      // not takibi yeni başladıysa eski notları "yeni" diye yağdırma
+      const quiet = first || (it.key.startsWith("grade:") && !gradesKnown && !(it.time && it.time > nowTs - 3 * 86400))
+      st.firstSeen[it.key] = { t: quiet ? (it.time || 0) : nowTs, updated: Boolean(prev) && !first }
       arch.push({ at: nowTs, key: it.key, version: it.version, course: it.course, kind: it.kind, title: it.title,
         time: it.time, text: it.text, events: ex.events })
-      if (!first && it.kind.startsWith("duyuru")) fresh.push(it)
+      if (!quiet && (it.kind.startsWith("duyuru") || it.kind === "not")) fresh.push(it)
       st.seen[it.key] = it.version
     }
   }
@@ -624,6 +688,36 @@ function ingest(st, data) {
 }
 
 // ============================================================ brifing modeli
+const KIND_TR = { "etkinlik (label)": "sayfa metni", "etkinlik (resource)": "dosya", "etkinlik (url)": "bağlantı",
+  "etkinlik (assign)": "ödev", "etkinlik (quiz)": "quiz", "etkinlik (forum)": "forum", "etkinlik (folder)": "klasör",
+  "etkinlik (page)": "sayfa", "etkinlik (feedback)": "anket", "etkinlik (choice)": "anket",
+  "etkinlik (scheduler)": "randevu", "bölüm": "bölüm notu" }
+const kindTr = k => KIND_TR[k] || String(k || "").replace(/^etkinlik \((.*)\)$/, "$1")
+// Moodle "label" adını metnin ilk 50 karakterinden üretir; ilk anlamlı parçayı al
+function shortTitle(n, limit = 70) {
+  let t = n.title || ""
+  if (n.kind === "etkinlik (label)") { const head = t.split(/[:(\n]/)[0].trim(); if (head.length >= 3) t = head }
+  return t.length <= limit ? t : t.slice(0, limit - 1) + "…"
+}
+const NO_MERGE = ["duyuru", "duyuru cevabı", "forum", "forum cevabı", "mesaj", "bildirim", "not"]
+const kindPrio = k => ["ödev", "quiz"].includes(k) ? 0 : (["dosya", "sayfa"].includes(k) || k.endsWith(" eki")) ? 1 : k === "takvim" ? 9 : 3
+function baseTitle(n) {
+  let t = unescapeHtml(n.title || "").split(" / ")[0]
+  if (n.kind === "takvim") t = t.replace(/\s+(is due|is due to be graded|closes|opens|should be completed)\s*$/i, "")
+  return t.replace(/\s+/g, " ").trim().toLowerCase()
+}
+// Aynı şeyin Moodle'daki kopyalarını tek satıra indirir: bir "resource" ile dosyası, bir ödevin
+// etkinlik + ödev + takvim kayıtları. Aynı klasördeki farklı dosyalar ayrı kalır.
+function dedupeNews(items) {
+  const groups = {}
+  for (const n of items) if (!NO_MERGE.includes(n.kind)) (groups[n.course + "|" + baseTitle(n)] = groups[n.course + "|" + baseTitle(n)] || []).push(n)
+  const drop = new Set()
+  for (const g of Object.values(groups)) {
+    const best = g.reduce((a, b) => kindPrio(b.kind) < kindPrio(a.kind) ? b : a)
+    for (const n of g) if (n.kind !== best.kind) { drop.add(n.key); if (n.change && !best.change) best.change = n.change }
+  }
+  return items.filter(n => !drop.has(n.key))
+}
 function buildModel(st, asOf) {
   const doc = []
   for (const [k, ex] of Object.entries(st.extracted)) {
@@ -642,9 +736,11 @@ function buildModel(st, asOf) {
     const sig = n.course + "|" + (n.title || "").toLowerCase() + "|" + hash(n.text || n.key).slice(0, 8)
     if (!seenNews.has(sig)) { seenNews.add(sig); uniq.push(n) }
   }
-  const ann = uniq.filter(n => ["duyuru", "duyuru cevabı", "mesaj"].includes(n.kind))
-  const other = uniq.filter(n => !ann.includes(n))
-  return { asOf, todays, exams, week, ann, other, user: st.user }
+  const merged = dedupeNews(uniq)
+  const ann = merged.filter(n => ["duyuru", "duyuru cevabı", "mesaj"].includes(n.kind))
+  const grades = merged.filter(n => n.kind === "not")
+  const other = merged.filter(n => !ann.includes(n) && !grades.includes(n))
+  return { asOf, todays, exams, week, ann, grades, other, user: st.user }
 }
 function label(e) {
   const title = (e.title || "").trim(), typ = e.type || ""
@@ -665,6 +761,7 @@ function notificationText(m) {
     lines.push(`🎯 ${e.course} ${label(e)} · ${trDate(e._d)} (${left(e._n)})${e.changed_from ? " ⚠️ tarih değişti" : ""}`)
   }
   if (m.week.length) lines.push(`📅 Bu hafta ${m.week.length} teslim/etkinlik`)
+  if (m.grades.length) lines.push(`📊 Yeni not: ` + m.grades.slice(0, 2).map(g => `${g.course} ${g.title} ${String(g.text || "").split("\n")[0]}`).join(" · "))
   if (m.ann.length) lines.push(`📣 ${m.ann.length} yeni duyuru: ` + m.ann.slice(0, 2).map(a => `${a.course} ${a.title}`).join(" · "))
   return lines.join("\n")
 }
@@ -688,8 +785,19 @@ function briefHtml(m) {
   const annHtml = m.ann.map(a => {
     const body = String(a.text || "").replace(/^Gönderen:[\s\S]*?\n\n/, "").trim()
     return `<div class=ann><b>${esc(a.course)} · ${esc(a.title)}</b>${a.updated ? " <i>(güncellendi)</i>" : ""}` +
+      `${a.updated && a.change ? `<div class=w>✏️ değişen: ${esc(a.change)}</div>` : ""}` +
       `<p>${esc(body.slice(0, 600))}${body.length > 600 ? "…" : ""}</p>${a.url ? `<a href="${esc(a.url)}">Moodle'da aç</a>` : ""}</div>`
   }).join("")
+  const gradeHtml = li(m.grades.slice(0, 15).map(g => {
+    const lines = String(g.text || "").split("\n"), fb = lines.slice(1).join(" ").replace(/\s+/g, " ").trim()
+    return `<li><b>${esc(g.course)}</b> ${esc((g.title || "").slice(0, 60))}: <b>${esc(lines[0])}</b>${g.updated ? " <i>(değişti)</i>" : ""}` +
+      `${fb ? `<div class=d>${esc(fb.slice(0, 140))}</div>` : ""}</li>`
+  }))
+  const otherHtml = li(m.other.slice(0, 25).map(o => {
+    const chg = o.updated && o.change
+    return `<li>${esc(o.course)} · ${esc(kindTr(o.kind))}: ${esc(shortTitle(o, chg ? 38 : 70))}` +
+      `${chg ? ` — <i>${esc(o.change)}</i>` : (o.updated ? " <i>(güncellendi)</i>" : "")}</li>`
+  }))
   const d = m.asOf
   return `<!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
 <style>
@@ -703,9 +811,10 @@ h1{font-size:26px;margin:4px 0 2px}h2{font-size:17px;margin:22px 0 6px}ul{paddin
 ${S("📌 Bugün", m.todays.length ? li(m.todays.map(e => evLi(e, false))) : "<div class=empty>Kayıtlı bir şey yok</div>")}
 ${S("🎯 Sınavlar", m.exams.length ? li(m.exams.map(e => evLi(e, true))) : "<div class=empty>Kayıtlı sınav yok</div>")}
 ${S("📅 Bu hafta", weekHtml || "<div class=empty>Teslim yok</div>")}
+${m.grades.length ? S(`📊 Yeni notlar (${m.grades.length})`, gradeHtml) : ""}
 ${m.ann.length ? S(`📣 Yeni duyurular (${m.ann.length})`, annHtml) : ""}
-${m.other.length ? S(`🆕 Diğer (${m.other.length})`, li(m.other.slice(0, 25).map(o => `<li>${esc(o.course)} · ${esc(o.kind)}: ${esc((o.title || "").slice(0, 70))}${o.updated ? " <i>(güncellendi)</i>" : ""}</li>`))) : ""}
-${!m.ann.length && !m.other.length ? `<h2>🆕 Son 24 saatte yeni bir şey yok</h2>` : ""}
+${m.other.length ? S(`🆕 Diğer (${m.other.length})`, otherHtml) : ""}
+${!m.ann.length && !m.other.length && !m.grades.length ? `<h2>🆕 Son 24 saatte yeni bir şey yok</h2>` : ""}
 <div class=foot>❔ = duyuru metninden çıkarıldı, teyit et<br>Moodle Brief ${VERSION} · veriler sadece bu telefonda</div>
 </body></html>`
 }
@@ -738,7 +847,7 @@ async function instantNotify(st, fresh) {
     if (sent[it.key] === it.version) continue
     const n = new Notification()
     n.threadIdentifier = "moodlebrief"
-    n.title = `📣 ${it.course} · ${it.title}`
+    n.title = `${it.kind === "not" ? "📊 Yeni not" : "📣"} ${it.course} · ${it.title}`
     n.body = String(it.text || "").replace(/^Gönderen:[\s\S]*?\n\n/, "").trim().slice(0, 240)
     n.openURL = URLScheme.forRunningScript() + "?view=brief"
     await n.schedule()
@@ -820,6 +929,7 @@ function widget(m, st, error) {
     w.addSpacer(4)
     const wk = [...m.todays, ...m.week].slice(0, fam === "large" ? 6 : 2)
     wk.forEach(e => line(`${trDate(e._d)} · ${e.course} ${label(e)}`, 11))
+    if (m.grades.length) line(`📊 ${m.grades[0].course} ${m.grades[0].title}: ${String(m.grades[0].text || "").split("\n")[0]}`, 11, true)
     if (m.ann.length) line(`📣 ${m.ann.length} yeni duyuru`, 11, true)
   }
   w.addSpacer()
@@ -943,7 +1053,7 @@ async function settings(st, base) {
 if (typeof __TEST__ !== "undefined") {
   __EXPORTS__.api = { regexDates, freeExtract, supersede, mergedEvents, buildModel, ingest, notificationText, briefHtml,
     shortCourse, examSlot, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setFm: f => { fm = f },
-    loadState, saveState, nextSendDate, WARNINGS, htmlToText, unescapeHtml }
+    loadState, saveState, nextSendDate, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr }
 } else {
   await main()
   Script.complete()

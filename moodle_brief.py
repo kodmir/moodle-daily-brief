@@ -397,6 +397,17 @@ def _replies(m: "Moodle", d: Dict[str, Any], did: Any, tm: Any, kind: str, cn: s
     return out
 
 
+def fmt_grade(g: Dict[str, Any]) -> str:
+    """Not öğesini '85/100' gibi yazar; harf notu / yüzde ise olduğu gibi bırakır."""
+    val = str(g.get("gradeformatted") if g.get("gradeformatted") not in (None, "") else g.get("graderaw")).strip()
+    try:
+        num = f"{float(val.replace(',', '.')):g}"
+    except ValueError:
+        return val
+    mx = g.get("grademax")
+    return f"{num}/{float(mx):g}" if isinstance(mx, (int, float)) and mx else num
+
+
 def active_courses(m: Moodle, userid: int) -> List[Dict[str, Any]]:
     courses = m.call("core_enrol_get_users_courses", userid=userid)
     now = int(time.time())
@@ -579,6 +590,19 @@ def collect(m: Moodle, reply_cache: Optional[Dict[str, Any]] = None) -> Dict[str
                 continue
             items.append(mk(f"msg:{msg.get('id')}", "mesaj", "Mesaj", f"{who or conv.get('name', '')}",
                             html_to_text(msg.get("text")), t=msg.get("timecreated"), version="1"))
+
+    # 8) Notlar (hoca not girdiğinde / değiştirdiğinde)
+    for c in courses:
+        res = m.try_call("gradereport_user_get_grade_items", default={}, courseid=c["id"], userid=userid) or {}
+        for ug in (res.get("usergrades") or []) if isinstance(res, dict) else []:
+            for g in ug.get("gradeitems") or []:
+                if g.get("itemtype") != "mod" or g.get("graderaw") is None:
+                    continue
+                fb = html_to_text(g.get("feedback"))
+                items.append(mk(f"grade:{c['id']}:{g.get('id')}", "not", cname[c["id"]], g.get("itemname") or "Not",
+                                fmt_grade(g) + (f"\n{fb}" if fb else ""),
+                                t=g.get("gradedategraded") or g.get("gradedatesubmitted"),
+                                version=h(g.get("graderaw"), fb), extract=False))
 
     # tekilleştir
     uniq: Dict[str, Dict[str, Any]] = {}
@@ -1074,7 +1098,7 @@ def free_extract(it: Dict[str, Any]) -> Dict[str, Any]:
     one = re.sub(r"\s+", " ", text).strip()
     rel_ok = it["kind"] in ("duyuru", "forum", "duyuru cevabı", "forum cevabı", "mesaj", "bildirim")
     events = regex_dates(text, it.get("time") if rel_ok else None, it.get("title") or "") \
-        if it["kind"] not in ("takvim",) else []
+        if it["kind"] not in ("takvim", "not") else []
     imp = "high" if it["kind"] in ("duyuru", "mesaj") or any(e["type"] in ("class_change", "midterm", "final", "exam") for e in events) else "medium"
     return {"summary": one[:160], "importance": imp, "events": events}
 
@@ -1204,6 +1228,103 @@ def _link(url: str, text: str = "Moodle'da aç") -> str:
     return f'<a href="{html.escape(url, quote=True)}">{E(text)}</a>' if url else ""
 
 
+KIND_TR = {"etkinlik (label)": "sayfa metni", "etkinlik (resource)": "dosya", "etkinlik (url)": "bağlantı",
+           "etkinlik (assign)": "ödev", "etkinlik (quiz)": "quiz", "etkinlik (forum)": "forum",
+           "etkinlik (folder)": "klasör", "etkinlik (page)": "sayfa", "etkinlik (feedback)": "anket",
+           "etkinlik (choice)": "anket", "etkinlik (scheduler)": "randevu", "bölüm": "bölüm notu"}
+NO_MERGE = ("duyuru", "duyuru cevabı", "forum", "forum cevabı", "mesaj", "bildirim", "not")
+
+
+def kind_tr(kind: str) -> str:
+    return KIND_TR.get(kind) or re.sub(r"^etkinlik \((.*)\)$", r"\1", kind or "")
+
+
+def short_title(it: Dict[str, Any], limit: int = 70) -> str:
+    """Gösterilecek başlık. Moodle 'label' adını metnin ilk 50 karakterinden üretir; ilk anlamlı parçayı al."""
+    t = it.get("title") or ""
+    if it.get("kind") == "etkinlik (label)":
+        head = re.split(r"[:(\n]", t, maxsplit=1)[0].strip()
+        if len(head) >= 3:
+            t = head
+    return t if len(t) <= limit else t[:limit - 1] + "…"
+
+
+def _kind_prio(kind: str) -> int:
+    if kind in ("ödev", "quiz"):
+        return 0
+    if kind in ("dosya", "sayfa") or kind.endswith(" eki"):
+        return 1
+    return 9 if kind == "takvim" else 3
+
+
+def _base_title(it: Dict[str, Any]) -> str:
+    t = html.unescape(it.get("title") or "").split(" / ")[0]
+    if it["kind"] == "takvim":
+        t = re.sub(r"\s+(is due|is due to be graded|closes|opens|should be completed)\s*$", "", t, flags=re.I)
+    return re.sub(r"\s+", " ", t).strip().lower()
+
+
+def dedupe_news(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Aynı şeyin Moodle'daki kopyalarını tek satıra indirir: bir 'resource' ile onun dosyası, bir ödevin
+    etkinlik + ödev + takvim kayıtları. Aynı klasördeki farklı dosyalar ayrı kalır."""
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    for it in items:
+        if it["kind"] not in NO_MERGE:
+            groups.setdefault((it["course"], _base_title(it)), []).append(it)
+    drop = set()
+    for g in groups.values():
+        best = min(g, key=lambda x: _kind_prio(x["kind"]))
+        for it in g:
+            if it["kind"] != best["kind"]:
+                drop.add(it["key"])
+                if it.get("change") and not best.get("change"):
+                    best["change"] = it["change"]
+    return [it for it in items if it["key"] not in drop]
+
+
+def diff_summary(old: Optional[str], new: Optional[str], limit: int = 110) -> str:
+    """Güncellenen bir metinde NE değişti: eklenen satırlar; satırın sadece sonu uzadıysa eklenen kısım."""
+    if not old or not new:
+        return ""
+    skip = re.compile(r"^(Gönderen|Tarih|Son teslim|Açılış|Kapanış):")
+    old_lines = [l.strip() for l in old.split("\n") if l.strip()]
+    old_set = set(old_lines)
+    out: List[str] = []
+    for l in (x.strip() for x in new.split("\n")):
+        if not l or l in old_set or skip.match(l):
+            continue
+        pre = max((o for o in old_lines if l.startswith(o)), key=len, default="")
+        piece = "+ " + l[len(pre):].strip() if pre and len(pre) >= 6 else l
+        piece = piece if len(piece) <= 80 else piece[:77] + "…"
+        if piece not in out:
+            out.append(piece)
+        if len(out) == 2:
+            break
+    res = " · ".join(out)
+    return res if len(res) <= limit else res[:limit - 1] + "…"
+
+
+_ARCHIVE_LAST: Optional[Dict[str, str]] = None
+
+
+def archive_last_text(key: str) -> Optional[str]:
+    """Bir öğenin arşivdeki son (yani bir önceki) sürümünün metni."""
+    global _ARCHIVE_LAST
+    if _ARCHIVE_LAST is None:
+        _ARCHIVE_LAST = {}
+        try:
+            with open(ARCHIVE_FILE, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                        _ARCHIVE_LAST[r["key"]] = r.get("text") or ""
+                    except Exception:
+                        continue
+        except OSError:
+            pass
+    return _ARCHIVE_LAST.get(key)
+
+
 def free_brief(ctx: Dict[str, Any], new_items: List[Dict[str, Any]]) -> str:
     today = datetime.now(TZ)
     evs = merged_events(ctx)
@@ -1243,9 +1364,19 @@ def free_brief(ctx: Dict[str, Any], new_items: List[Dict[str, Any]]) -> str:
             continue
         seen_news.add(k)
         uniq_items.append(it)
+    uniq_items = dedupe_news(uniq_items)
     ann_kinds = ("duyuru", "mesaj", "duyuru cevabı")
     ann = [it for it in uniq_items if it["kind"] in ann_kinds]
-    other = [it for it in uniq_items if it not in ann]
+    grades = [it for it in uniq_items if it["kind"] == "not"]
+    other = [it for it in uniq_items if it not in ann and it not in grades]
+    if grades:
+        L.append(f"\n📊 <b>YENİ NOTLAR ({len(grades)})</b>")
+        for it in grades[:15]:
+            lines = (it.get("text") or "").split("\n")
+            fb = re.sub(r"\s+", " ", " ".join(lines[1:])).strip()
+            upd = " (değişti)" if it.get("updated") else ""
+            L.append(f"• <b>{E(it['course'])}</b> {E(it['title'][:60])}: <b>{E(lines[0])}</b>{upd}"
+                     + (f"\n   <i>{E(fb[:140])}</i>" if fb else ""))
     if ann:
         L.append(f"\n📣 <b>YENİ DUYURULAR ({len(ann)})</b>")
         for it in ann:
@@ -1255,19 +1386,25 @@ def free_brief(ctx: Dict[str, Any], new_items: List[Dict[str, Any]]) -> str:
             cut = len(body) > 450
             body = body if not cut else body[:450].rstrip() + "…"
             upd = " (güncellendi)" if it.get("updated") else ""
+            chg = f"\n✏️ <i>değişen: {E(it['change'])}</i>" if it.get("updated") and it.get("change") else ""
             more = f"\n{_link(it.get('url', ''), 'devamı Moodle’da')}" if cut and it.get("url") else ""
-            L.append(f"\n<b>{E(it['course'])} · {E(it['title'])}</b>{upd}\n{E(body)}{more}")
+            L.append(f"\n<b>{E(it['course'])} · {E(it['title'])}</b>{upd}{chg}\n{E(body)}{more}")
     if other:
         L.append(f"\n🆕 <b>DİĞER ({len(other)})</b>")
         for it in other[:25]:
-            upd = " (güncellendi)" if it.get("updated") else ""
-            L.append(f"• {E(it['course'])} · {E(it['kind'])}: {E(it['title'][:70])}{upd}")
+            if it.get("updated") and it.get("change"):
+                tail = f" — <i>{E(it['change'])}</i>"
+                title = short_title(it, 38)
+            else:
+                tail = " (güncellendi)" if it.get("updated") else ""
+                title = short_title(it)
+            L.append(f"• {E(it['course'])} · {E(kind_tr(it['kind']))}: {E(title)}{tail}")
         if len(other) > 25:
             L.append(f"… ve {len(other) - 25} öğe daha")
     if ctx.get("removed"):
         L.append(f"\n🗂 <b>MOODLE'DAN KALDIRILANLAR</b> <i>(arşivde duruyor)</i>")
         for x in ctx["removed"][:10]:
-            L.append(f"• {E(x['course'] or '')} · {E(x['kind'] or '')}: {E((x['title'] or '')[:70])}")
+            L.append(f"• {E(x['course'] or '')} · {E(kind_tr(x['kind'] or ''))}: {E((x['title'] or '')[:70])}")
     if not uniq_items:
         last = ctx.get("last_sent")
         gap = (today.date() - datetime.strptime(last, "%Y-%m-%d").date()).days if last else 1
@@ -1490,10 +1627,14 @@ def main() -> None:
 
     # yeni / değişmiş öğeler
     new_items = []
+    grades_known = any(k.startswith("grade:") for k in state["seen"])
     for it in data["items"]:
         prev = state["seen"].get(it["key"])
         if prev == it["version"]:
             continue
+        if it["key"].startswith("grade:") and not grades_known and not first_run \
+                and not (it.get("time") and it["time"] > now - 3 * 86400):
+            continue  # not takibi yeni başladı: eski notları 'yeni' diye yağdırma
         if first_run or args.cmd == "init":
             if it.get("time") and it["time"] > now - 7 * 86400:
                 new_items.append(it)
@@ -1521,6 +1662,10 @@ def main() -> None:
                    "mode": MODE, "posted": it.get("time") or _key_num(it["key"])})
         prev = state["extracted"].get(it["key"])
         hist = list((prev or {}).get("previous_versions", []))
+        if prev and prev.get("version") != it["version"] and not it.get("file"):
+            chg = diff_summary(archive_last_text(it["key"]), it.get("text"))
+            if chg:
+                it["change"] = ex["change"] = chg
         if prev and prev.get("version") != it["version"]:
             # içerik değişti: eski sürümün tarihleri kayıtta kalır (silinmez), sadece gösterilmez
             hist.append({"version": prev.get("version"), "posted": prev.get("posted"),

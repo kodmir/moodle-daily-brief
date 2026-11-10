@@ -66,6 +66,12 @@ def fake_call(self, fn, **p):
         cid = p["forumid"] - 100
         return {"discussions": [{"discussion": did, "subject": s, "message": b, "created": cr, "modified": cr,
                                  "userfullname": "Instructor", "numreplies": 0} for did, s, b, cr in POSTS.get(cid, [])]}
+    if fn == "gradereport_user_get_grade_items":
+        if p["courseid"] != 2:
+            return {"usergrades": []}
+        return {"usergrades": [{"gradeitems": [{"id": 1, "itemname": "Quiz 1", "itemtype": "mod", "graderaw": 82,
+                                                "gradeformatted": "82.00", "grademax": 100, "feedback": "",
+                                                "gradedategraded": now - 5 * 3600}]}]}
     if fn == "mod_quiz_get_quizzes_by_courses":
         return {"quizzes": [{"id": 7, "course": 3, "name": "Quiz 2", "timeopen": int((today + timedelta(days=1)).replace(hour=10, minute=0).timestamp()), "timeclose": 0, "intro": ""}]}
     return {}

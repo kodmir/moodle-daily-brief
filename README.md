@@ -52,7 +52,7 @@ flowchart LR
 ```
 
 1. **Collect** everything via Moodle's web service API: course contents, files, announcements and forum
-   replies, assignments, quizzes, calendar events and notifications.
+   replies, assignments, quizzes, calendar events, notifications and grades.
 2. **Diff** against the previous run's state, so new and *edited* items are detected by content hash.
 3. **Extract dates** from free-text announcements with a rule-based parser (Turkish and English).
 4. **Merge** these with Moodle's structured dates, resolve conflicts, and render one compact brief.
@@ -78,6 +78,11 @@ A half-fetched Moodle never produces an "all clear" message.
 **Never delete anything.** Every version of every item is appended to `data/archive.jsonl`. Edited
 announcements keep their previous versions. Items removed from Moodle are *hidden* (and reported), never
 deleted, and only after 3 consecutive clean runs, so a temporary outage can't hide anything.
+
+**Signal, not noise.** One upload in Moodle shows up as a module, a file and sometimes a calendar entry;
+these are merged into one line. Updated items say *what* changed (`Recordings — + R8`) instead of a bare
+"updated". New or changed grades get their own section, and grades that existed before tracking started
+stay quiet.
 
 **Scheduling you can trust.** GitHub's built-in cron didn't fire at all on a new repo, so an external
 scheduler triggers the workflow. The script is idempotent (one brief per day, lock file, retries until noon),
@@ -114,8 +119,15 @@ once per day after `SEND_TIME`). Configuration goes in `.env` (see `.env.example
 ```bash
 pip install -r requirements.txt
 python demo.py      # fake Moodle, prints the brief
-pytest -q           # 44 tests: date parsing, failure modes, no-delete guarantees
+pytest -q           # 51 tests: date parsing, failure modes, grades, de-duplication, no-delete guarantees
 ```
+
+## iPhone version
+
+`docs/moodle-brief.js` is a port for [Scriptable](https://scriptable.app): the same parser and rules running
+entirely on the phone, with a morning notification, instant alerts for new announcements and grades, and a
+home-screen widget. Sign-in happens on Moodle's own page (SSO); the token stays in the device keychain.
+Install page: https://kodmir.github.io/moodle-daily-brief/
 
 ## Optional: Claude mode
 
@@ -134,6 +146,7 @@ syllabus PDF), and the brief is written by Claude. Without a key the tool is ful
 
 ```
 moodle_brief.py        collection, diffing, date extraction, rendering, Telegram, state
+docs/                  install page (GitHub Pages) + the iPhone/Scriptable port
 demo.py                offline demo with a fake Moodle
 tests/                 pytest suite (frozen clock, fake Moodle and Telegram)
 .github/workflows/     brief.yml (daily run), tests.yml (CI on 3.9 and 3.12)
