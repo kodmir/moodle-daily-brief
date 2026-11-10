@@ -125,8 +125,8 @@ pytest -q           # 51 tests: date parsing, failure modes, grades, de-duplicat
 ## iPhone version
 
 `docs/moodle-brief.js` is a port for [Scriptable](https://scriptable.app): the same parser and rules running
-entirely on the phone, with a morning notification, instant alerts for new announcements and grades, and a
-home-screen widget. Sign-in happens on Moodle's own page (SSO); the token stays in the device keychain.
+entirely on the phone, with a morning notification, instant alerts for new announcements and grades, deadline
+reminders that go quiet once an assignment is submitted, and a home-screen widget. Sign-in happens on Moodle's own page (SSO); the token stays in the device keychain.
 Install page: https://kodmir.github.io/moodle-daily-brief/
 
 ## Optional: Claude mode
@@ -147,6 +147,7 @@ syllabus PDF), and the brief is written by Claude. Without a key the tool is ful
 ```
 moodle_brief.py        collection, diffing, date extraction, rendering, Telegram, state
 docs/                  install page (GitHub Pages) + the iPhone/Scriptable port
+tests/ios/             Node tests for the iPhone port (fake Moodle, fake Scriptable APIs)
 demo.py                offline demo with a fake Moodle
 tests/                 pytest suite (frozen clock, fake Moodle and Telegram)
 .github/workflows/     brief.yml (daily run), tests.yml (CI on 3.9 and 3.12)

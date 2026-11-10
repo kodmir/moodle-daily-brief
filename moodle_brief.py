@@ -408,6 +408,32 @@ def fmt_grade(g: Dict[str, Any]) -> str:
     return f"{num}/{float(mx):g}" if isinstance(mx, (int, float)) and mx else num
 
 
+def grades_from_table(res: Any) -> List[Dict[str, Any]]:
+    """gradereport_user_get_grades_table çıktısını (HTML hücreleri) not kalemlerine çevirir.
+    Kategori ve toplam satırları atlanır; notu girilmemiş kalemler ('-') atlanır."""
+    out: List[Dict[str, Any]] = []
+    for tb in (res.get("tables") or []) if isinstance(res, dict) else []:
+        for row in tb.get("tabledata") or []:
+            if not isinstance(row, dict) or not isinstance(row.get("itemname"), dict):
+                continue
+            cell = row["itemname"]
+            cls = str(cell.get("class") or "")
+            name = re.sub(r"\s+", " ", html_to_text(cell.get("content"))).strip()
+            grade = html_to_text((row.get("grade") or {}).get("content")) if isinstance(row.get("grade"), dict) else ""
+            if not name or not grade or grade in ("-", "–", "—"):
+                continue
+            if re.search(r"category|courseitem|bagg", cls) or re.search(r"\b(total|toplam[ıi]?)\b", name, re.I):
+                continue
+            rid = re.search(r"row_(\d+)_", str(cell.get("id") or ""))
+            rng = html_to_text((row.get("range") or {}).get("content")) if isinstance(row.get("range"), dict) else ""
+            mx = re.findall(r"\d+(?:[.,]\d+)?", rng)
+            fb = (row.get("feedback") or {}).get("content") if isinstance(row.get("feedback"), dict) else ""
+            out.append({"id": rid.group(1) if rid else "n" + h(name), "itemname": name, "graderaw": grade,
+                        "gradeformatted": grade, "grademax": float(mx[-1].replace(",", ".")) if mx else None,
+                        "feedback": fb})
+    return out
+
+
 def active_courses(m: Moodle, userid: int) -> List[Dict[str, Any]]:
     courses = m.call("core_enrol_get_users_courses", userid=userid)
     now = int(time.time())
@@ -593,16 +619,22 @@ def collect(m: Moodle, reply_cache: Optional[Dict[str, Any]] = None) -> Dict[str
 
     # 8) Notlar (hoca not girdiğinde / değiştirdiğinde)
     for c in courses:
-        res = m.try_call("gradereport_user_get_grade_items", default={}, courseid=c["id"], userid=userid) or {}
-        for ug in (res.get("usergrades") or []) if isinstance(res, dict) else []:
-            for g in ug.get("gradeitems") or []:
-                if g.get("itemtype") != "mod" or g.get("graderaw") is None:
-                    continue
-                fb = html_to_text(g.get("feedback"))
-                items.append(mk(f"grade:{c['id']}:{g.get('id')}", "not", cname[c["id"]], g.get("itemname") or "Not",
-                                fmt_grade(g) + (f"\n{fb}" if fb else ""),
-                                t=g.get("gradedategraded") or g.get("gradedatesubmitted"),
-                                version=h(g.get("graderaw"), fb), extract=False))
+        try:
+            res = m.call("gradereport_user_get_grade_items", courseid=c["id"], userid=userid)
+            ugs = (res.get("usergrades") or []) if isinstance(res, dict) else []
+            rows = [g for ug in ugs for g in (ug.get("gradeitems") or [])
+                    if g.get("itemtype") in ("mod", "manual") and g.get("graderaw") is not None]
+        except MoodleError as e:
+            # Bazı derslerde Moodle bu raporu üretemiyor (invalidresponse): not tablosundan oku
+            rows = grades_from_table(m.try_call("gradereport_user_get_grades_table", default={},
+                                                courseid=c["id"], userid=userid))
+            log(f"Not raporu {cname[c['id']]} (id {c['id']}): yedek tablo yöntemi, {len(rows)} not ({str(e)[:60]})")
+        for g in rows:
+            fb = html_to_text(g.get("feedback"))
+            items.append(mk(f"grade:{c['id']}:{g.get('id')}", "not", cname[c["id"]], g.get("itemname") or "Not",
+                            fmt_grade(g) + (f"\n{fb}" if fb else ""),
+                            t=g.get("gradedategraded") or g.get("gradedatesubmitted"),
+                            version=h(g.get("graderaw"), fb), extract=False))
 
     # tekilleştir
     uniq: Dict[str, Dict[str, Any]] = {}
@@ -1627,14 +1659,14 @@ def main() -> None:
 
     # yeni / değişmiş öğeler
     new_items = []
-    grades_known = any(k.startswith("grade:") for k in state["seen"])
+    grade_courses = {k.rsplit(":", 1)[0] for k in state["seen"] if k.startswith("grade:")}
     for it in data["items"]:
         prev = state["seen"].get(it["key"])
         if prev == it["version"]:
             continue
-        if it["key"].startswith("grade:") and not grades_known and not first_run \
+        if it["key"].startswith("grade:") and it["key"].rsplit(":", 1)[0] not in grade_courses and not first_run \
                 and not (it.get("time") and it["time"] > now - 3 * 86400):
-            continue  # not takibi yeni başladı: eski notları 'yeni' diye yağdırma
+            continue  # bu derste not takibi yeni başladı: eski notları 'yeni' diye yağdırma
         if first_run or args.cmd == "init":
             if it.get("time") and it["time"] > now - 7 * 86400:
                 new_items.append(it)

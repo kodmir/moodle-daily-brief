@@ -26,3 +26,16 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt pytest
       - run: pytest -q
+
+  ios:
+    name: iPhone port (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run tests against docs/moodle-brief.js
+        env:
+          TZ: Europe/Istanbul
+        run: for f in tests/ios/*.js; do node "$f"; done

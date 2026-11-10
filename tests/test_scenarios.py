@@ -29,6 +29,8 @@ class FakeMoodle:
         self.calendar = []          # (id, name, timestart) for course 1
         self.grades = {}            # course id -> list of grade items
         self.grades_disabled = False
+        self.grades_invalid = set()  # course ids where the grade report returns "invalidresponse"
+        self.grades_table = {}       # course id -> gradereport_user_get_grades_table response
 
     def __call__(self, fn, **p):
         mb = self.mb
@@ -54,9 +56,13 @@ class FakeMoodle:
         if fn == "core_calendar_get_calendar_events":
             return {"events": [{"id": i, "name": n, "courseid": 1, "timestart": t, "modulename": "assign", "description": ""}
                                for i, n, t in self.calendar]}
+        if fn == "gradereport_user_get_grades_table":
+            return self.grades_table.get(p["courseid"], {})
         if fn == "gradereport_user_get_grade_items":
             if self.grades_disabled:
                 raise mb.MoodleError("gradereport_user_get_grade_items: nopermission")
+            if p["courseid"] in self.grades_invalid:
+                raise mb.MoodleError("gradereport_user_get_grade_items: invalidresponse — Invalid response value detected")
             return {"usergrades": [{"gradeitems": self.grades.get(p["courseid"], [])}]}
         if fn == "mod_forum_get_forums_by_courses":
             return [{"id": 50 + c["id"], "course": c["id"], "type": "news"} for c in self.courses]
@@ -417,3 +423,33 @@ def test_grade_formatting(mb):
     assert mb.fmt_grade({"gradeformatted": "85.00", "graderaw": 85, "grademax": 100}) == "85/100"
     assert mb.fmt_grade({"gradeformatted": "8,50", "graderaw": 8.5, "grademax": 10}) == "8.5/10"
     assert mb.fmt_grade({"gradeformatted": "BA", "graderaw": 3.5, "grademax": 4}) == "BA"
+
+
+GRADES_TABLE = {"tables": [{"tabledata": [
+    {"itemname": {"class": "level1 category", "content": "<span>IE 202</span>", "id": "cat_1_7"}},
+    {"itemname": {"class": "level2 item", "content": '<a href="#">Quiz 2</a>', "id": "row_901_7"},
+     "grade": {"content": "85,00"}, "range": {"content": "0&ndash;100"}, "feedback": {"content": "<p>Good</p>"}},
+    {"itemname": {"class": "level2 item", "content": "Midterm", "id": "row_902_7"}, "grade": {"content": "-"}},
+    {"itemname": {"class": "level1 baggt", "content": "Course total", "id": "row_999_7"}, "grade": {"content": "60.00"}},
+    [], None,
+]}]}
+
+
+def test_grades_table_parsing(mb):
+    rows = mb.grades_from_table(GRADES_TABLE)
+    assert [(r["id"], r["itemname"], mb.fmt_grade(r)) for r in rows] == [("901", "Quiz 2", "85/100")]
+    assert mb.grades_from_table(None) == [] and mb.grades_from_table({"tables": [{}]}) == []
+
+
+def test_grade_report_invalidresponse_falls_back_to_table(env):
+    """Some courses make Moodle's grade-items report fail; grades are then read from the grades table."""
+    mb, moodle, tg = env
+    run(mb, "run")
+    moodle.grades_invalid = {1}
+    moodle.grades_table = {1: GRADES_TABLE}
+    new_day(mb)
+    assert run(mb, "run", "--force") == 0
+    st = json.loads(mb.STATE_FILE.read_text())
+    assert "grade:1:901" in st["extracted"]                            # same key as the normal report would give
+    assert "17 Kas" in tg.last                                         # rest of the brief unaffected
+

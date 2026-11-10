@@ -10,11 +10,12 @@
 // Kayıtlar asla silinmez; eskiyen ya da Moodle'dan kalkan öğeler sadece gösterilmez.
 // ------------------------------------------------------------------------------------------
 
-const VERSION = "1.1.0"
+const VERSION = "1.2.0"
 const DEFAULT_URL = "https://moodle.bogazici.edu.tr"
 const KC_TOKEN = "moodlebrief.token"
 const KC_URL = "moodlebrief.url"
 const NOTIF_MORNING = "moodlebrief.morning"
+const NOTIF_DUE = "moodlebrief.due."
 const LOOKAHEAD_DAYS = 45
 
 // ============================================================ zaman yardımcıları
@@ -126,6 +127,11 @@ async function tryCall(base, token, fn, params, dflt) {
   }
 }
 
+async function quietCall(base, token, fn, params) {
+  try { return await call(base, token, fn, params) }
+  catch (e) { if (e instanceof MoodleError || e instanceof TokenError) return null; throw e }
+}
+
 // ============================================================ toplama
 function mk(key, kind, course, title, text = "", t = null, version = null, url = "", file = null, extract = true) {
   title = unescapeHtml(title || "")
@@ -144,6 +150,26 @@ function fmtGrade(g) {
   if (val === "" || Number.isNaN(n)) return val
   const num = String(parseFloat(n.toFixed(2))), mx = Number(g.grademax)
   return mx ? `${num}/${parseFloat(mx.toFixed(2))}` : num
+}
+
+// gradereport_user_get_grades_table çıktısını not kalemlerine çevirir (kategori/toplam ve boş notlar atlanır)
+function gradesFromTable(res) {
+  const out = []
+  for (const tb of arr(res && res.tables)) for (const row of arr(tb.tabledata)) {
+    if (!row || typeof row !== "object" || !row.itemname || typeof row.itemname !== "object") continue
+    const cell = row.itemname, cls = String(cell.class || "")
+    const name = htmlToText(cell.content).replace(/\s+/g, " ").trim()
+    const grade = row.grade && typeof row.grade === "object" ? htmlToText(row.grade.content) : ""
+    if (!name || !grade || ["-", "–", "—"].includes(grade)) continue
+    if (/category|courseitem|bagg/.test(cls) || /(^|[^\p{L}])(total|toplam[ıi]?)($|[^\p{L}])/iu.test(name)) continue
+    const rid = String(cell.id || "").match(/row_(\d+)_/)
+    const rng = row.range && typeof row.range === "object" ? htmlToText(row.range.content) : ""
+    const mx = rng.match(/\d+(?:[.,]\d+)?/g)
+    out.push({ id: rid ? rid[1] : "n" + hash(name), itemname: name, graderaw: grade, gradeformatted: grade,
+      grademax: mx ? Number(mx[mx.length - 1].replace(",", ".")) : null,
+      feedback: row.feedback && typeof row.feedback === "object" ? row.feedback.content : "" })
+  }
+  return out
 }
 
 async function collect(base, token, replyCache) {
@@ -249,7 +275,17 @@ async function collect(base, token, replyCache) {
       const due = a.duedate || 0, intro = htmlToText(a.intro)
       items.push(mk(`assign:${a.id}`, "ödev", cn, a.name, `Son teslim: ${due ? fmtTs(due) : "belirtilmemiş"}\n${intro}`,
         a.timemodified, hash(a.name, due, intro)))
-      if (due && due > nowTs - 86400) struct.push(structEv(cn, unescapeHtml(a.name), "ödev teslimi", due, "moodle ödev"))
+      if (due && due > nowTs - 86400) {
+        const ev = structEv(cn, unescapeHtml(a.name), "ödev teslimi", due, "moodle ödev")
+        // yaklaşan ödev teslim edilmiş mi? (edildiyse hatırlatma yapılmaz, ✓ gösterilir)
+        if (due > nowTs && due < nowTs + 14 * 86400) {
+          const sub = await quietCall(base, token, "mod_assign_get_submission_status", { assignid: a.id })
+          const la = sub && typeof sub === "object" ? sub.lastattempt : null
+          const stt = la && ((la.submission && la.submission.status) || (la.teamsubmission && la.teamsubmission.status))
+          if (stt === "submitted") ev.done = true
+        }
+        struct.push(ev)
+      }
     }
   }
 
@@ -293,9 +329,12 @@ async function collect(base, token, replyCache) {
 
   // 7) notlar (hoca not girdiğinde / değiştirdiğinde)
   for (const c of courses) {
-    const gr = await tryCall(base, token, "gradereport_user_get_grade_items", { courseid: c.id, userid: info.userid }, {}) || {}
-    for (const ug of arr(gr.usergrades)) for (const g of arr(ug.gradeitems)) {
-      if (g.itemtype !== "mod" || g.graderaw === null || g.graderaw === undefined) continue
+    const gr = await tryCall(base, token, "gradereport_user_get_grade_items", { courseid: c.id, userid: info.userid }, null)
+    // Bazı derslerde Moodle bu raporu üretemiyor (invalidresponse): not tablosundan oku
+    const rows = gr ? arr(gr.usergrades).flatMap(ug => arr(ug.gradeitems))
+        .filter(g => ["mod", "manual"].includes(g.itemtype) && g.graderaw !== null && g.graderaw !== undefined)
+      : gradesFromTable(await tryCall(base, token, "gradereport_user_get_grades_table", { courseid: c.id, userid: info.userid }, {}))
+    for (const g of rows) {
       const fb = htmlToText(g.feedback)
       items.push(mk(`grade:${c.id}:${g.id}`, "not", cname[c.id], g.itemname || "Not", fmtGrade(g) + (fb ? "\n" + fb : ""),
         g.gradedategraded || g.gradedatesubmitted || null, hash(g.graderaw, fb), "", null, false))
@@ -641,7 +680,7 @@ function archiveLastText(key) {       // bir öğenin arşivdeki son (yani önce
 function ingest(st, data) {
   const nowTs = Math.floor(now() / 1000), first = Object.keys(st.seen).length === 0
   const fresh = [], arch = []
-  const gradesKnown = Object.keys(st.seen).some(k => k.startsWith("grade:"))
+  const gradeCourses = new Set(Object.keys(st.seen).filter(k => k.startsWith("grade:")).map(k => k.slice(0, k.lastIndexOf(":"))))
   archiveCache = null
   for (const it of data.items) {
     const prev = st.seen[it.key]
@@ -660,8 +699,9 @@ function ingest(st, data) {
         }
       }
       st.extracted[it.key] = ex
-      // not takibi yeni başladıysa eski notları "yeni" diye yağdırma
-      const quiet = first || (it.key.startsWith("grade:") && !gradesKnown && !(it.time && it.time > nowTs - 3 * 86400))
+      // bir derste not takibi yeni başladıysa eski notları "yeni" diye yağdırma
+      const quiet = first || (it.key.startsWith("grade:") && !gradeCourses.has(it.key.slice(0, it.key.lastIndexOf(":"))) &&
+        !(it.time && it.time > nowTs - 3 * 86400))
       st.firstSeen[it.key] = { t: quiet ? (it.time || 0) : nowTs, updated: Boolean(prev) && !first }
       arch.push({ at: nowTs, key: it.key, version: it.version, course: it.course, kind: it.kind, title: it.title,
         time: it.time, text: it.text, events: ex.events })
@@ -722,7 +762,7 @@ function buildModel(st, asOf) {
   const doc = []
   for (const [k, ex] of Object.entries(st.extracted)) {
     if (ex.hidden) continue
-    for (const e of ex.events || []) doc.push({ ...e, course: ex.course, posted: ex.posted || 0 })
+    for (const e of ex.events || []) doc.push({ ...e, course: ex.course, posted: ex.posted || 0, url: ex.url || "" })
   }
   const evs = mergedEvents(st.lastStruct || [], supersede(doc), asOf)
   const todays = evs.filter(e => e._n === 0)
@@ -740,7 +780,7 @@ function buildModel(st, asOf) {
   const ann = merged.filter(n => ["duyuru", "duyuru cevabı", "mesaj"].includes(n.kind))
   const grades = merged.filter(n => n.kind === "not")
   const other = merged.filter(n => !ann.includes(n) && !grades.includes(n))
-  return { asOf, todays, exams, week, ann, grades, other, user: st.user }
+  return { asOf, todays, exams, week, ann, grades, other, all: evs, user: st.user }
 }
 function label(e) {
   const title = (e.title || "").trim(), typ = e.type || ""
@@ -754,13 +794,15 @@ const evLine = (e, withDate = true) =>
 // Bildirim metni (kısa)
 function notificationText(m) {
   const lines = []
-  lines.push(m.todays.length ? "📌 Bugün: " + m.todays.map(e => `${e.course} ${label(e)}${e._t ? " " + e._t : ""}`).join(" · ")
-    : "📌 Bugün kayıtlı bir şey yok")
+  const open = m.todays.filter(e => !e.done)
+  lines.push(open.length ? "📌 Bugün: " + open.map(e => `${e.course} ${label(e)}${e._t ? " " + e._t : ""}`).join(" · ")
+    : m.todays.length ? "📌 Bugünkü teslimler tamam ✓" : "📌 Bugün kayıtlı bir şey yok")
   if (m.exams.length) {
     const e = m.exams[0]
     lines.push(`🎯 ${e.course} ${label(e)} · ${trDate(e._d)} (${left(e._n)})${e.changed_from ? " ⚠️ tarih değişti" : ""}`)
   }
-  if (m.week.length) lines.push(`📅 Bu hafta ${m.week.length} teslim/etkinlik`)
+  const wk = m.week.filter(e => !e.done)
+  if (wk.length) lines.push(`📅 Bu hafta ${wk.length} teslim/etkinlik`)
   if (m.grades.length) lines.push(`📊 Yeni not: ` + m.grades.slice(0, 2).map(g => `${g.course} ${g.title} ${String(g.text || "").split("\n")[0]}`).join(" · "))
   if (m.ann.length) lines.push(`📣 ${m.ann.length} yeni duyuru: ` + m.ann.slice(0, 2).map(a => `${a.course} ${a.title}`).join(" · "))
   return lines.join("\n")
@@ -772,6 +814,9 @@ function briefHtml(m) {
   const li = arr => arr.length ? `<ul>${arr.join("")}</ul>` : ""
   const evLi = (e, withDate) => `<li><b>${esc(e.course)}</b> ${esc(label(e))}${mark(e)}` +
     `${withDate ? ` <span class=d>· ${esc(trDate(e._d))}${e._t ? " " + e._t : ""} (${left(e._n)})</span>` : (e._t ? ` <span class=d>${e._t}</span>` : "")}` +
+    `${e.done ? ` <span class=ok>✓ teslim edildi</span>` : ""}` +
+    `${e.certainty === "approximate" && e.url ? ` <a class=src href="${esc(e.url)}">duyuru ›</a>` : ""}` +
+    `${e.certainty === "approximate" && (e.title || "").length > 45 ? `<div class=q>“${esc(e.title)}”</div>` : ""}` +
     `${e.changed_from ? `<div class=w>⚠️ tarih değişti (eskisi ${esc(trDate(fromYmd(e.changed_from)))})</div>` : ""}` +
     `${e.weekday_mismatch ? `<div class=w>⚠️ gün adı tarihle uyuşmuyor, kontrol et</div>` : ""}</li>`
   let weekHtml = ""
@@ -805,6 +850,7 @@ function briefHtml(m) {
 @media(prefers-color-scheme:dark){body{background:#000;color:#eee}.ann{background:#1c1c1e!important}.d,.foot{color:#999!important}}
 h1{font-size:26px;margin:4px 0 2px}h2{font-size:17px;margin:22px 0 6px}ul{padding-left:18px;margin:4px 0}li{margin:4px 0}
 .d{color:#666}.w{color:#d97706;font-size:14px}.day{font-weight:600;margin-top:8px}.ann{background:#f2f2f7;border-radius:12px;padding:10px 12px;margin:8px 0}
+.ok{color:#1a7f45;font-size:14px}.q{color:#777;font-size:14px;font-style:italic}.src{font-size:14px;white-space:nowrap}
 .ann p{margin:6px 0;white-space:pre-wrap}.empty{color:#888}.foot{color:#888;font-size:13px;margin-top:24px}a{color:#0a84ff}
 </style></head><body>
 <h1>☀️ ${d.getDate()} ${AY_KISA[d.getMonth()]} ${GUN[d.getDay()]}</h1>
@@ -839,6 +885,48 @@ async function scheduleMorning(st, deliverNow = false) {
   await n.schedule()
   if (deliverNow) st.deliveredDay = ymd(at)
   st.nextMorning = at.getTime()
+}
+// Teslim edilmemiş, saati belli (Moodle'ın kendi kaydı olan) işler için bitimine 3 saat kala hatırlatma.
+// Gece 23:00–08:00'e denk gelirse bir önceki akşam 22:00'ye alınır. Aynı iş için bir kez çalar.
+function reminderTime(due) {
+  let at = new Date(due.getTime() - 3 * 3600 * 1000)
+  const h = at.getHours()
+  if (h >= 23 || h < 8) {
+    const b = h < 8 ? addDays(at, -1) : at
+    at = new Date(b.getFullYear(), b.getMonth(), b.getDate(), 22, 0)
+  }
+  return at
+}
+async function scheduleReminders(st, evs) {
+  const old = st.reminders || {}, keep = {}, nowMs = now().getTime()
+  if (st.settings.deadlineReminders !== false) {
+    for (const e of evs) {
+      if (e.certainty !== "exact" || !e.time || e.done) continue
+      if (/açılış/.test(e.title || "") || /açılış/.test(e.type || "")) continue
+      const [hh, mm] = e.time.split(":").map(Number), d0 = fromYmd(e.date)
+      const due = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate(), hh, mm)
+      const ms = due.getTime() - nowMs
+      if (ms <= 20 * 60 * 1000 || ms > 48 * 3600 * 1000) continue
+      const id = NOTIF_DUE + hash(e.course, e.title, e.date, e.time)
+      if (old[id] && old[id].at <= nowMs) { keep[id] = old[id]; continue }      // zaten çaldı
+      let at = reminderTime(due)
+      if (at.getTime() <= nowMs) at = new Date(nowMs + 60 * 1000)               // pencerenin içinde öğrendiysek hemen
+      const dn = daysBetween(at, ymd(e._d))
+      const n = new Notification()
+      n.identifier = id
+      n.threadIdentifier = "moodlebrief"
+      n.title = `⏰ ${e.course} · ${e.title}`
+      n.body = `${dn <= 0 ? "Bugün" : dn === 1 ? "Yarın" : trDate(e._d)} ${e._t} son.`
+      n.openURL = URLScheme.forRunningScript() + "?view=brief"
+      n.setTriggerDate(at)
+      await n.schedule()
+      keep[id] = { at: at.getTime() }
+    }
+  }
+  // artık gerekmeyen (teslim edildi / tarihi değişti / kapatıldı) bekleyen hatırlatmaları iptal et
+  const stale = Object.keys(old).filter(id => !keep[id] && old[id].at > nowMs)
+  if (stale.length) Notification.removePending(stale)
+  st.reminders = keep
 }
 async function instantNotify(st, fresh) {
   if (!st.settings.instantAnnouncements) return
@@ -925,9 +1013,15 @@ function widget(m, st, error) {
   if (m.exams.length) {
     m.exams.slice(0, max).forEach(e => line(`${e.course} ${TYPE_LABEL[e.type] || e.title} · ${left(e._n)}`, fam === "small" ? 12 : 13, true))
   } else line("Kayıtlı sınav yok", 12, false, true)
-  if (fam !== "small") {
+  const pending = [...m.todays, ...m.week].filter(e => !e.done && !m.exams.includes(e))
+  if (fam === "small") {
     w.addSpacer(4)
-    const wk = [...m.todays, ...m.week].slice(0, fam === "large" ? 6 : 2)
+    if (pending.length) line(`${left(pending[0]._n)}: ${pending[0].course} ${label(pending[0])}`, 11)
+    if (m.grades.length) line(`📊 ${m.grades.length} yeni not`, 11, true)
+    if (m.ann.length) line(`📣 ${m.ann.length} yeni duyuru`, 11, true)
+  } else {
+    w.addSpacer(4)
+    const wk = pending.slice(0, fam === "large" ? 6 : 2)
     wk.forEach(e => line(`${trDate(e._d)} · ${e.course} ${label(e)}`, 11))
     if (m.grades.length) line(`📊 ${m.grades[0].course} ${m.grades[0].title}: ${String(m.grades[0].text || "").split("\n")[0]}`, 11, true)
     if (m.ann.length) line(`📣 ${m.ann.length} yeni duyuru`, 11, true)
@@ -997,9 +1091,10 @@ async function main() {
     await scheduleMorning(st, true)
   }
   await scheduleMorning(st, false)      // bir sonraki sabahı güncel veriyle (yeniden) planla
+  const model = buildModel(st, now())
+  try { await scheduleReminders(st, model.all) } catch (e) {}
   saveState(st)
 
-  const model = buildModel(st, now())
   if (inWidget) { Script.setWidget(widget(model, st, error)); return }
   if (inShortcut) { Script.setShortcutOutput(notificationText(model)); return }
 
@@ -1007,7 +1102,9 @@ async function main() {
   const wv = new WebView()
   let wantSettings = false
   wv.shouldAllowRequest = (req) => {
-    if (String(req.url).startsWith("moodlebrief://settings")) { wantSettings = true; Timer.schedule(50, false, () => wv.loadHTML(DONE_SETTINGS)); return false }
+    const u = String(req.url || "")
+    if (u.startsWith("moodlebrief://settings")) { wantSettings = true; Timer.schedule(50, false, () => wv.loadHTML(DONE_SETTINGS)); return false }
+    if (/^https?:\/\//i.test(u)) { Safari.open(u); return false }
     return true
   }
   let html = briefHtml(model)
@@ -1020,9 +1117,12 @@ async function main() {
 const DONE_SETTINGS = `<html><head><meta name=viewport content="width=device-width,initial-scale=1"><style>body{font-family:-apple-system;display:flex;align-items:center;justify-content:center;height:90vh;text-align:center}</style></head><body><p>Ayarlar için sol üstteki <b>Close</b>'a bas.</p></body></html>`
 
 async function settings(st, base) {
-  const c = await alert("Ayarlar", `Sabah bildirimi: ${st.settings.sendTime}\nAnlık duyuru bildirimi: ${st.settings.instantAnnouncements ? "açık" : "kapalı"}`,
+  const remOn = st.settings.deadlineReminders !== false
+  const c = await alert("Ayarlar", `Sabah bildirimi: ${st.settings.sendTime}\nAnlık duyuru bildirimi: ${st.settings.instantAnnouncements ? "açık" : "kapalı"}` +
+    `\nTeslim hatırlatması (3 saat kala): ${remOn ? "açık" : "kapalı"}`,
     ["Bildirim saatini değiştir", st.settings.instantAnnouncements ? "Anlık duyuruları kapat" : "Anlık duyuruları aç",
-      "Sabah bildirimini tam saatinde almak (Kestirmeler)", "Moodle bağlantısını yenile"], "Kapat")
+      "Sabah bildirimini tam saatinde almak (Kestirmeler)", "Moodle bağlantısını yenile",
+      remOn ? "Teslim hatırlatmalarını kapat" : "Teslim hatırlatmalarını aç"], "Kapat")
   if (c === 0) {
     const a = new Alert()
     a.title = "Bildirim saati"
@@ -1045,6 +1145,9 @@ async function settings(st, base) {
     Keychain.remove(KC_TOKEN)
     const t = await onboarding(base)
     if (t) await alert("Tamam", "Bağlantı yenilendi.")
+  } else if (c === 4) {
+    st.settings.deadlineReminders = !remOn
+    try { await scheduleReminders(st, buildModel(st, now()).all) } catch (e) {}
   }
   saveState(st)
 }
@@ -1053,7 +1156,7 @@ async function settings(st, base) {
 if (typeof __TEST__ !== "undefined") {
   __EXPORTS__.api = { regexDates, freeExtract, supersede, mergedEvents, buildModel, ingest, notificationText, briefHtml,
     shortCourse, examSlot, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setFm: f => { fm = f },
-    loadState, saveState, nextSendDate, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr }
+    loadState, saveState, nextSendDate, reminderTime, scheduleReminders, widget, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr, gradesFromTable }
 } else {
   await main()
   Script.complete()
