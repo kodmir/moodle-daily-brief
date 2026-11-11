@@ -291,6 +291,44 @@ def test_format_migration_does_not_flood_updates(env):
     assert "güncellendi" not in tg.last
 
 
+REVIEW_POST = ("You can find your midterm grade on the Moodle page.<br>The silent midterm exam review session "
+               "will be on Wednesday, November 11th, between 13.00-16.00 at EF102.")
+
+
+def test_exam_review_session_is_not_listed_as_an_exam(env):
+    mb, moodle, tg = env
+    moodle.posts.append((301, 2, "Midterm Grades and Review Session Details", REVIEW_POST, NOW - 3600))
+    run(mb, "run")
+    exams = plain(tg.last).split("🎯")[1].split("📅")[0]
+    assert "IE202" in exams and "17 Kas" in exams                     # the real upcoming midterm
+    assert "MATH101" not in exams and "11 Kas" not in exams           # not the review session
+    assert "İtiraz/inceleme" in plain(tg.last)                        # still listed, under its own label
+
+
+def test_rule_change_rescans_stored_items_without_flooding(env):
+    mb, moodle, tg = env
+    moodle.posts.append((301, 2, "Midterm Grades and Review Session Details", REVIEW_POST, NOW - 3600))
+    run(mb, "run")
+    st = mb.load_state()                                              # as an older rule set stored it
+    st["extracted"]["disc:301"]["events"] = [{"title": "x", "type": "midterm", "date": "2026-11-11", "time": "13:00",
+                                              "certainty": "approximate", "detail": "metinden"}]
+    st["extracted"]["disc:301"]["mode"] = "free5"
+    st["last_sent_date"] = "2000-01-01"
+    mb.save_state(st)
+    run(mb, "run", "--force")
+    assert [e["type"] for e in mb.load_state()["extracted"]["disc:301"]["events"]] == ["review"]
+    assert "yeni bir şey yok" in tg.last and "güncellendi" not in tg.last
+
+
+def test_is_exam_ignores_post_exam_sessions(mb):
+    assert mb.is_exam({"type": "midterm", "title": "x"})
+    assert mb.is_exam({"type": "course", "title": "Quiz 4"})
+    assert mb.is_exam({"type": "class_change", "title": "The midterm is postponed to November 17"})
+    assert not mb.is_exam({"type": "course", "title": "Exam 1 review and objections"})
+    assert not mb.is_exam({"type": "review", "title": "The objection session for Quiz 1 will be held on Monday"})
+    assert not mb.is_exam({"type": "scheduler", "title": "Meeting with your Teacher"})
+
+
 def test_concurrent_runs_are_locked(mb):
     lock = mb._acquire_lock()
     assert lock is not None and mb._acquire_lock() is None

@@ -10,7 +10,8 @@
 // Kayıtlar asla silinmez; eskiyen ya da Moodle'dan kalkan öğeler sadece gösterilmez.
 // ------------------------------------------------------------------------------------------
 
-const VERSION = "1.2.0"
+const VERSION = "1.3.0"
+const RULES = "2"                        // tarih çıkarma kuralları değişince artar: kayıtlı duyurular yeniden taranır
 const DEFAULT_URL = "https://moodle.bogazici.edu.tr"
 const KC_TOKEN = "moodlebrief.token"
 const KC_URL = "moodlebrief.url"
@@ -315,7 +316,9 @@ async function collect(base, token, replyCache) {
     const ts = e.timestart || e.timesort
     if (!ts) continue
     const cn = cname[e.courseid] || "Genel", desc = htmlToText(e.description)
-    struct.push(structEv(cn, unescapeHtml(e.name), e.modulename || e.eventtype || "etkinlik", ts, "moodle takvim"))
+    const sev = structEv(cn, unescapeHtml(e.name), e.modulename || e.eventtype || "etkinlik", ts, "moodle takvim")
+    if (e.eventtype) sev.etype = String(e.eventtype)
+    struct.push(sev)
     items.push(mk(`cal:${e.id}`, "takvim", cn, e.name, `${fmtTs(ts)}\n${desc}`, e.timemodified,
       hash(e.name, ts, desc), "", null, Boolean(desc)))
   }
@@ -363,10 +366,11 @@ const KEYWORDS = [
   ["project", "proje|project"],
   ["presentation", "sunum|presentation"],
   ["lab", "\\blab"],
+  ["review", "objections?|itiraz|review session|paper viewing|ka[ğg][ıi]t inceleme"],
   ["class_change", "iptal|cancel|telafi|make-?up|ertelen|postpone|resched"],
 ]
 const TYPE_LABEL = { midterm: "Ara sınav", final: "Final", quiz: "Quiz", exam: "Sınav", assignment: "Ödev",
-  project: "Proje", presentation: "Sunum", lab: "Lab", class_change: "Ders değişikliği" }
+  project: "Proje", presentation: "Sunum", lab: "Lab", class_change: "Ders değişikliği", review: "İtiraz/inceleme" }
 const EXAM_RE = /midterm|mid-term|vize|s[ıiIİ]nav|\bfinal|quiz|exam/i
 const WEEKDAYS = { monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 0,
   pazartesi: 1, salı: 2, sali: 2, çarşamba: 3, carsamba: 3, perşembe: 4, persembe: 4, cuma: 5, cumartesi: 6, pazar: 0 }
@@ -379,9 +383,10 @@ const RE_TIME = /(?:saat\s*|at\s*|@\s*)?\b([01]?\d|2[0-3])[:.]([0-5]\d)\b/
 const RE_AMPM = /\b(1[0-2]|0?[1-9])(?:[:.]([0-5]\d))?\s*(a\.?m\.?|p\.?m\.?)(?![a-z])/
 const RE_WD = new RegExp(WL + "(" + WD_ALT + ")" + WR, "u")
 const RE_NOT_EVENT_AFTER = new RegExp(
-  "^\\s*(?:#?\\s*\\d+\\s*)?(?:topics?|review|grades?|results?|papers?|objections?|solutions?|coverage|scope|" +
+  "^\\s*(?:#?\\s*\\d+\\s*)?(?:(?:exam(?:ination)?s?|tests?|s[ıi]nav[ıi]?)\\s+)?(?:(?:silent|paper|kağıt)\\s+)?" +
+  "(?:topics?|review|grades?|results?|papers?|objections?|solutions?|coverage|scope|" +
   "preparation|prep|classroom assignments?|seating|notları|notlar|konuları|kapsamı|sonuçları|kağıtları|" +
-  "itiraz|çözümleri|hazırlık|grading)" +
+  "itiraz|çözümleri|hazırlık|grading|viewing|re-?evaluation|answer keys?|averages?|statistics|inceleme|ortalamas[ıi])" +
   "|^s?\\s*(?:#?\\s*\\d+\\s+)?(?:date\\s+|dates\\s+|details\\s+|tarihi\\s+)?(?:will be|is to be|are to be|to be|is going to be)\\s+" +
   "(?:announced|posted|shared|published|released|made)" +
   "|^s?\\S*\\s*(?:\\S+\\s+){0,3}(?:duyurulacak|açıklanacak|ilan edilecek|paylaşılacak)")
@@ -391,6 +396,8 @@ const RE_OLD_AFTER = /^\s*(?:'?(?:dan|den|tan|ten)\b)?\s*(?:tarihinden|tarihinde
 const RE_REL_DAY = new RegExp(WL + "(yarın(?:ki|da)?|yarin(?:ki|da)?|tomorrow|bugün(?:kü|ki)?|bugun(?:ku|ki)?|today|tonight|bu akşam(?:ki)?)" + WR, "gu")
 const RE_REL_WD = new RegExp(WL + "(this|next|coming|on|bu|önümüzdeki|gelecek|haftaya)\\s+(?:week\\s+|hafta(?:ki)?\\s+)?(" + WD_ALT + ")" + WR, "gu")
 const SPECIFIC_EXAMS = ["midterm", "final", "quiz"]
+const RE_PLACE_BEFORE = /(?<![\p{L}\p{N}])(?:at|in|@)\s+(?:the\s+)?(?:[\p{L}\p{N}.&-]+\s+){0,2}$/u
+const RE_REVIEW = /objections?|itiraz|review session|paper viewing|ka[ğg][ıi]t inceleme/
 
 function monthOf(word) {
   const w = lowerTr(word)
@@ -437,6 +444,7 @@ function classify(low, s, a, b) {
     while ((km = re.exec(sentenceLow))) {
       const ks = a + km.index, ke = ks + km[0].length
       if (RE_NOT_EVENT_AFTER.test(low.slice(ke, ke + 50)) || RE_NOT_EVENT_BEFORE.test(low.slice(Math.max(0, ks - 15), ks))) continue
+      if (typ === "lab" && RE_PLACE_BEFORE.test(low.slice(Math.max(0, ks - 40), ks)) && !/^(?:oratory)?\s*\p{L}/u.test(low.slice(ke, ke + 14))) continue
       const dist = Math.abs(ks - s) + (typ === "exam" ? 40 : 0)
       if (dist < bestDist) { best = typ; bestDist = dist }
       if (km[0].length === 0) re.lastIndex++
@@ -444,7 +452,8 @@ function classify(low, s, a, b) {
   }
   return best
 }
-function refine(best, low, s, titleLow) {
+function refine(best, low, s, titleLow, sentenceLow = "") {
+  if (best === null && /session|oturum/.test(sentenceLow) && RE_REVIEW.test(low.slice(Math.max(0, s - 220), s))) return "review"
   if (best !== "exam") return best
   for (const src of [low.slice(Math.max(0, s - 220), s), titleLow]) {
     let found = null
@@ -501,7 +510,7 @@ function regexDates(text, posted = null, title = "") {
     }
     if (!d) continue
     if (d < addDays(today, -60) || d > addDays(today, year ? 365 : 200)) continue
-    const best = refine(classify(low, s, a, b), low, s, titleLow)
+    const best = refine(classify(low, s, a, b), low, s, titleLow, low.slice(a, b))
     if (best === null && !strong) continue
     taken.push([s, e])
     const key = `${ymd(d)}:${best}`
@@ -530,7 +539,7 @@ function regexDates(text, posted = null, title = "") {
     for (const [s, e, d] of rels) {
       const [a, b] = span(text, s, e)
       if (taken.some(([ts]) => a <= ts && ts < b)) continue
-      const best = refine(classify(low, s, a, b), low, s, titleLow)
+      const best = refine(classify(low, s, a, b), low, s, titleLow, low.slice(a, b))
       if (best === null) continue
       if (d < addDays(today, -7) || d > addDays(today, 60)) continue
       const key = `${ymd(d)}:${best}`
@@ -593,8 +602,10 @@ const STOP = new Set(["due", "is", "closes", "close", "opens", "open", "kapanı�
   "the", "submission", "deadline", "assignment", "ödev", "quiz"])
 const normTitle = t => lowerEn(t).replace(/[^\p{L}\p{N} ]+/gu, " ").split(/\s+/).filter(w => w && !STOP.has(w)).join(" ")
 const sameThing = (a, b) => { const x = normTitle(a), y = normTitle(b); return Boolean(x && y) && (x.includes(y) || y.includes(x)) }
+// "Exam review session", "Quiz 1 objection", "sınav kağıdı inceleme": sınavın kendisi değil, sonrası
+const RE_EXAM_AFTERMATH = /objection|itiraz|review|grades?(?![\p{L}])|results?(?![\p{L}])|papers?(?![\p{L}])|viewing|re-?evaluation|scheduler|notlar|sonuç|kağıt|inceleme/iu
 const isExam = e => ["midterm", "final", "quiz", "exam"].includes((e.type || "").toLowerCase()) ||
-  (e.type || "").toLowerCase().includes("quiz") || EXAM_RE.test(e.title || "")
+  (e.type || "").toLowerCase().includes("quiz") || (EXAM_RE.test(e.title || "") && !RE_EXAM_AFTERMATH.test(e.title || ""))
 
 function mergedEvents(struct, docEvents, asOf) {
   const prio = { "moodle ödev": 0, "moodle quiz": 1, "moodle": 2, "moodle takvim": 3 }
@@ -615,6 +626,7 @@ function mergedEvents(struct, docEvents, asOf) {
     let d = fromYmd(e.date), t = e.time
     if (t === "00:00") { d = addDays(d, -1); t = "23:59" }       // 00:00 teslim = önceki gecenin sonu
     e._d = d; e._t = t; e._n = daysBetween(asOf, ymd(d))
+    e._past = e._n === 0 && Boolean(t) && t < hm(asOf)          // bugün ama saati geçti
   }
   return out.filter(e => e._n >= 0 && e._n <= LOOKAHEAD_DAYS).sort((a, b) => (a._d - b._d) || String(a._t || "99").localeCompare(String(b._t || "99")))
 }
@@ -679,7 +691,7 @@ function archiveLastText(key) {       // bir öğenin arşivdeki son (yani önce
 // Moodle'dan gelen veriyi kayıtlara işle; yeni duyuruları ve notları döndür
 function ingest(st, data) {
   const nowTs = Math.floor(now() / 1000), first = Object.keys(st.seen).length === 0
-  const fresh = [], arch = []
+  const fresh = [], arch = [], rescan = st.rules !== RULES
   const gradeCourses = new Set(Object.keys(st.seen).filter(k => k.startsWith("grade:")).map(k => k.slice(0, k.lastIndexOf(":"))))
   archiveCache = null
   for (const it of data.items) {
@@ -707,8 +719,11 @@ function ingest(st, data) {
         time: it.time, text: it.text, events: ex.events })
       if (!quiet && (it.kind.startsWith("duyuru") || it.kind === "not")) fresh.push(it)
       st.seen[it.key] = it.version
+    } else if (rescan && st.extracted[it.key] && !it.file) {
+      st.extracted[it.key].events = freeExtract(it).events      // eski kuralların yanlış okuduğu tarihler düzelir
     }
   }
+  st.rules = RULES
   archive(arch)
   // Moodle'dan kalkanlar: silinmez, 36 saattir yoksa (ve okuma hatası yoksa) gizlenir
   const live = new Set(data.items.map(i => i.key))
@@ -766,7 +781,7 @@ function buildModel(st, asOf) {
   }
   const evs = mergedEvents(st.lastStruct || [], supersede(doc), asOf)
   const todays = evs.filter(e => e._n === 0)
-  const exams = evs.filter(isExam).slice(0, 3)
+  const exams = evs.filter(e => isExam(e) && !e._past).slice(0, 3)
   const week = evs.filter(e => e._n >= 1 && e._n <= 7 && !exams.includes(e))
   const since = Math.floor(asOf / 1000) - 24 * 3600
   const news = Object.entries(st.firstSeen).filter(([k, f]) => f.t > since && st.extracted[k] && !st.extracted[k].hidden)
@@ -788,15 +803,23 @@ function label(e) {
   return title
 }
 const mark = e => e.certainty === "approximate" ? " ❔" : ""
+const cut = (s, n) => s.length <= n ? s : s.slice(0, n - 1).replace(/[\s(,.·:;-]+$/, "") + "…"
+// kısaltırken sondaki "(kapanış)" gibi etiketi korur: "Self-study Material 2 R… (kapanış)"
+function cutLabel(s, n) {
+  const m = s.match(/^(.*\S)(\s\([^()]{1,12}\))$/)
+  return m && s.length > n ? cut(m[1], n - m[2].length) + m[2] : cut(s, n)
+}
 const evLine = (e, withDate = true) =>
   `${e.course} ${label(e)}${mark(e)}${withDate ? ` · ${trDate(e._d)}` : ""}${e._t ? " " + e._t : ""}${withDate ? ` (${left(e._n)})` : ""}`
 
 // Bildirim metni (kısa)
 function notificationText(m) {
   const lines = []
-  const open = m.todays.filter(e => !e.done)
-  lines.push(open.length ? "📌 Bugün: " + open.map(e => `${e.course} ${label(e)}${e._t ? " " + e._t : ""}`).join(" · ")
-    : m.todays.length ? "📌 Bugünkü teslimler tamam ✓" : "📌 Bugün kayıtlı bir şey yok")
+  // kilit ekranında ~4 satır görünür: saat başta, başlık kısa, en çok 3 iş; saati geçenler yazılmaz
+  const live = m.todays.filter(e => !e._past), open = live.filter(e => !e.done)
+  lines.push(open.length ? "📌 Bugün: " + open.slice(0, 3).map(e => `${e._t ? e._t + " " : ""}${e.course} ${cutLabel(label(e), 34)}`).join(" · ") +
+      (open.length > 3 ? ` · +${open.length - 3}` : "")
+    : live.length ? "📌 Bugünkü teslimler tamam ✓" : m.todays.length ? "📌 Bugün kalan bir şey yok" : "📌 Bugün kayıtlı bir şey yok")
   if (m.exams.length) {
     const e = m.exams[0]
     lines.push(`🎯 ${e.course} ${label(e)} · ${trDate(e._d)} (${left(e._n)})${e.changed_from ? " ⚠️ tarih değişti" : ""}`)
@@ -814,7 +837,7 @@ function briefHtml(m) {
   const li = arr => arr.length ? `<ul>${arr.join("")}</ul>` : ""
   const evLi = (e, withDate) => `<li><b>${esc(e.course)}</b> ${esc(label(e))}${mark(e)}` +
     `${withDate ? ` <span class=d>· ${esc(trDate(e._d))}${e._t ? " " + e._t : ""} (${left(e._n)})</span>` : (e._t ? ` <span class=d>${e._t}</span>` : "")}` +
-    `${e.done ? ` <span class=ok>✓ teslim edildi</span>` : ""}` +
+    `${e.done ? ` <span class=ok>✓ teslim edildi</span>` : ""}${e._past && !e.done ? ` <span class=d>(saati geçti)</span>` : ""}` +
     `${e.certainty === "approximate" && e.url ? ` <a class=src href="${esc(e.url)}">duyuru ›</a>` : ""}` +
     `${e.certainty === "approximate" && (e.title || "").length > 45 ? `<div class=q>“${esc(e.title)}”</div>` : ""}` +
     `${e.changed_from ? `<div class=w>⚠️ tarih değişti (eskisi ${esc(trDate(fromYmd(e.changed_from)))})</div>` : ""}` +
@@ -897,12 +920,23 @@ function reminderTime(due) {
   }
   return at
 }
+// Hatırlatmanın türü: "due" = son teslim/kapanış, "open" = açılış (hatırlatılmaz), "start" = saatinde başlayan etkinlik
+function remKind(e) {
+  const title = e.title || "", typ = e.type || ""
+  if (/açılış/.test(title) || /açılış/.test(typ)) return "open"
+  if (e.source !== "moodle takvim") return "due"
+  const et = String(e.etype || "").toLowerCase()
+  if (/^open/.test(et) || /\sopens$/i.test(title)) return "open"
+  if (/close|due|expectcompletion/.test(et) || /\b(?:is due|due|closes|should be completed)\b|son gün|sona er|kapan|teslim/i.test(title)) return "due"
+  return "start"
+}
 async function scheduleReminders(st, evs) {
   const old = st.reminders || {}, keep = {}, nowMs = now().getTime()
   if (st.settings.deadlineReminders !== false) {
     for (const e of evs) {
       if (e.certainty !== "exact" || !e.time || e.done) continue
-      if (/açılış/.test(e.title || "") || /açılış/.test(e.type || "")) continue
+      const kind = remKind(e)
+      if (kind === "open") continue
       const [hh, mm] = e.time.split(":").map(Number), d0 = fromYmd(e.date)
       const due = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate(), hh, mm)
       const ms = due.getTime() - nowMs
@@ -915,8 +949,9 @@ async function scheduleReminders(st, evs) {
       const n = new Notification()
       n.identifier = id
       n.threadIdentifier = "moodlebrief"
-      n.title = `⏰ ${e.course} · ${e.title}`
-      n.body = `${dn <= 0 ? "Bugün" : dn === 1 ? "Yarın" : trDate(e._d)} ${e._t} son.`
+      // zaman başlıkta (kesilmez), işin tam adı gövdede; görüşme/etkinlik için "son" denmez
+      n.title = `⏰ ${e.course} · ${dn <= 0 ? "Bugün" : dn === 1 ? "Yarın" : trDate(e._d)} ${e._t}${kind === "due" ? " son" : ""}`
+      n.body = e.title
       n.openURL = URLScheme.forRunningScript() + "?view=brief"
       n.setTriggerDate(at)
       await n.schedule()
@@ -928,18 +963,34 @@ async function scheduleReminders(st, evs) {
   if (stale.length) Notification.removePending(stale)
   st.reminders = keep
 }
+// "Dear all," / "Merhaba arkadaşlar," gibi tek başına selam satırını atar ki bildirimde asıl cümle görünsün
+const stripHello = s => String(s || "").replace(
+  /^\s*(?:dear|hello|hi|merhabalar|merhaba|sevgili|değerli|selamlar|selam|sayın)(?![\p{L}])(?:[ \t]+[^\s,!:.]+){0,4}[ \t]*[,!:.]?[ \t]*\n+/iu, "")
 async function instantNotify(st, fresh) {
   if (!st.settings.instantAnnouncements) return
   const sent = st.notifiedInstant
-  for (const it of fresh.slice(0, 3)) {
-    if (sent[it.key] === it.version) continue
+  const todo = fresh.filter(it => sent[it.key] !== it.version)
+  for (const it of todo.slice(0, 3)) {
+    const upd = Boolean(st.firstSeen[it.key] && st.firstSeen[it.key].updated)
+    const chg = upd && st.extracted[it.key] ? st.extracted[it.key].change : ""
     const n = new Notification()
     n.threadIdentifier = "moodlebrief"
-    n.title = `${it.kind === "not" ? "📊 Yeni not" : "📣"} ${it.course} · ${it.title}`
-    n.body = String(it.text || "").replace(/^Gönderen:[\s\S]*?\n\n/, "").trim().slice(0, 240)
+    n.title = `${it.kind === "not" ? (upd ? "📊 Not değişti" : "📊 Yeni not") : (upd ? "📣 Güncellendi:" : "📣")} ${it.course} · ${it.title}`
+    n.body = ((chg ? `✏️ ${chg}\n` : "") + stripHello(String(it.text || "").replace(/^Gönderen:[\s\S]*?\n\n/, "")).trim()).slice(0, 240)
     n.openURL = URLScheme.forRunningScript() + "?view=brief"
     await n.schedule()
     sent[it.key] = it.version
+  }
+  // aynı anda 3'ten fazla yeni duyuru/not geldiyse kalanlar tek bildirimde (hiçbiri sessizce atlanmaz)
+  const rest = todo.slice(3)
+  if (rest.length) {
+    const n = new Notification()
+    n.threadIdentifier = "moodlebrief"
+    n.title = `📬 ${rest.length} yeni duyuru/not daha`
+    n.body = cut(rest.map(it => `${it.course} · ${it.title}`).join("\n"), 240)
+    n.openURL = URLScheme.forRunningScript() + "?view=brief"
+    await n.schedule()
+    rest.forEach(it => { sent[it.key] = it.version })
   }
 }
 
@@ -1013,7 +1064,7 @@ function widget(m, st, error) {
   if (m.exams.length) {
     m.exams.slice(0, max).forEach(e => line(`${e.course} ${TYPE_LABEL[e.type] || e.title} · ${left(e._n)}`, fam === "small" ? 12 : 13, true))
   } else line("Kayıtlı sınav yok", 12, false, true)
-  const pending = [...m.todays, ...m.week].filter(e => !e.done && !m.exams.includes(e))
+  const pending = [...m.todays, ...m.week].filter(e => !e.done && !e._past && !m.exams.includes(e))
   if (fam === "small") {
     w.addSpacer(4)
     if (pending.length) line(`${left(pending[0]._n)}: ${pending[0].course} ${label(pending[0])}`, 11)
@@ -1156,7 +1207,7 @@ async function settings(st, base) {
 if (typeof __TEST__ !== "undefined") {
   __EXPORTS__.api = { regexDates, freeExtract, supersede, mergedEvents, buildModel, ingest, notificationText, briefHtml,
     shortCourse, examSlot, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setFm: f => { fm = f },
-    loadState, saveState, nextSendDate, reminderTime, scheduleReminders, widget, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr, gradesFromTable }
+    loadState, saveState, nextSendDate, reminderTime, scheduleReminders, instantNotify, remKind, stripHello, widget, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr, gradesFromTable }
 } else {
   await main()
   Script.complete()

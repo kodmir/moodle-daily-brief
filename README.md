@@ -119,7 +119,7 @@ once per day after `SEND_TIME`). Configuration goes in `.env` (see `.env.example
 ```bash
 pip install -r requirements.txt
 python demo.py      # fake Moodle, prints the brief
-pytest -q           # 51 tests: date parsing, failure modes, grades, de-duplication, no-delete guarantees
+pytest -q           # 65 tests: date parsing, failure modes, grades, de-duplication, no-delete guarantees
 ```
 
 ## iPhone version

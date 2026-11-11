@@ -87,7 +87,7 @@ MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "40000"))
 LOOKAHEAD_DAYS = int(os.getenv("LOOKAHEAD_DAYS", "45"))
 # API key yoksa ücretsiz mod: Claude kullanılmaz, tarihler metinden kurallarla çıkarılır
 FREE_MODE = not ANTHROPIC_API_KEY
-MODE = "free5" if FREE_MODE else "claude"
+MODE = "free6" if FREE_MODE else "claude"  # kurallar değişince artar: kayıtlı öğeler yeniden taranır
 
 
 def _id_list(name: str) -> List[int]:
@@ -895,11 +895,12 @@ KEYWORDS = [
     ("project", r"proje|project"),
     ("presentation", r"sunum|presentation"),
     ("lab", r"\blab"),
+    ("review", r"objections?|itiraz|review session|paper viewing|ka[ğg][ıi]t inceleme"),
     ("class_change", r"iptal|cancel|telafi|make-?up|ertelen|postpone|resched"),
 ]
 TYPE_TR = {"midterm": "ara sınav", "final": "final", "quiz": "quiz", "exam": "sınav", "assignment": "ödev",
            "project": "proje", "presentation": "sunum", "lab": "lab", "class_change": "ders değişikliği",
-           "other": "tarih", "assign": "ödev", "due": "teslim", "course": "ders etkinliği",
+           "review": "itiraz/inceleme", "other": "tarih", "assign": "ödev", "due": "teslim", "course": "ders etkinliği",
            "user": "kişisel", "site": "genel", "open": "açılış", "close": "kapanış"}
 EXAM_RE = re.compile(r"midterm|mid-term|vize|s[ıiIİ]nav|\bfinal|quiz|exam", re.I)
 
@@ -957,11 +958,12 @@ WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 
             "pazartesi": 0, "salı": 1, "sali": 1, "çarşamba": 2, "carsamba": 2, "perşembe": 3, "persembe": 3,
             "cuma": 4, "cumartesi": 5, "pazar": 6}
 RE_WD = re.compile(r"\b(" + "|".join(sorted(WEEKDAYS, key=len, reverse=True)) + r")\b")
-# "midterm topics", "quiz 1 grades", "sınav sonuçları" → sınavın kendisi değil
+# "midterm topics", "quiz 1 grades", "midterm exam review session", "sınav sonuçları" → sınavın kendisi değil
 RE_NOT_EVENT_AFTER = re.compile(
-    r"^\s*(?:#?\s*\d+\s*)?(?:topics?|review|grades?|results?|papers?|objections?|solutions?|coverage|scope|"
+    r"^\s*(?:#?\s*\d+\s*)?(?:(?:exam(?:ination)?s?|tests?|s[ıi]nav[ıi]?)\s+)?(?:(?:silent|paper|kağıt)\s+)?"
+    r"(?:topics?|review|grades?|results?|papers?|objections?|solutions?|coverage|scope|"
     r"preparation|prep|classroom assignments?|seating|notları|notlar|konuları|kapsamı|sonuçları|kağıtları|"
-    r"itiraz|çözümleri|hazırlık|grading)"
+    r"itiraz|çözümleri|hazırlık|grading|viewing|re-?evaluation|answer keys?|averages?|statistics|inceleme|ortalamas[ıi])"
     # "The assignment will be announced tomorrow", "Quiz 2 date will be announced", "ödev duyurulacak":
     # bir şeyin AÇIKLANACAĞI tarih, o şeyin kendi tarihi değil
     r"|^s?\s*(?:#?\s*\d+\s+)?(?:date\s+|dates\s+|details\s+|tarihi\s+)?(?:will be|is to be|are to be|to be|is going to be)\s+"
@@ -972,6 +974,9 @@ RE_NOT_EVENT_BEFORE = re.compile(r"(?:before|after|for|until|prior to|öncesi|so
 RE_OLD_BEFORE = re.compile(r"(?:\bfrom|instead of|rather than|previously|originally|was scheduled (?:for|on)|"
                            r"was planned (?:for|on)|moved from|eski tarih|önceki tarih)\s*(?:the\s+|on\s+)?$")
 RE_OLD_AFTER = re.compile(r"^\s*(?:'?(?:dan|den|tan|ten)\b)?\s*(?:tarihinden|tarihindeki|yerine)")
+# "at the BUFAIM Lab (M2142)": lab burada yer adı, etkinlik türü değil
+RE_PLACE_BEFORE = re.compile(r"(?<![^\W_])(?:at|in|@)\s+(?:the\s+)?(?:[\w.&-]+\s+){0,2}$")
+RE_REVIEW = re.compile(r"objections?|itiraz|review session|paper viewing|ka[ğg][ıi]t inceleme")
 RE_AMPM = re.compile(r"\b(1[0-2]|0?[1-9])(?:[:.]([0-5]\d))?\s*(a\.?m\.?|p\.?m\.?)(?![a-z])")
 RE_REL_DAY = re.compile(r"\b(yarın(?:ki|da)?|yarin(?:ki|da)?|tomorrow|bugün(?:kü|ki)?|bugun(?:ku|ki)?|today|tonight|bu akşam(?:ki)?)\b")
 RE_REL_WD = re.compile(r"\b(this|next|coming|on|bu|önümüzdeki|gelecek|haftaya)\s+(?:week\s+|hafta(?:ki)?\s+)?(" +
@@ -1000,6 +1005,9 @@ def _classify(low: str, s: int, e: int, a: int, b: int):
             ks, ke = a + km.start(), a + km.end()
             if RE_NOT_EVENT_AFTER.search(low[ke:ke + 50]) or RE_NOT_EVENT_BEFORE.search(low[max(0, ks - 15):ks]):
                 continue
+            if typ == "lab" and RE_PLACE_BEFORE.search(low[max(0, ks - 40):ks]) \
+                    and not re.match(r"(?:oratory)?\s*[^\W\d_]", low[ke:ke + 14]):
+                continue
             dist = abs(ks - s) + (40 if typ == "exam" else 0)  # özel tür genelden önce
             if dist < best_dist:
                 best, best_dist = typ, dist
@@ -1009,9 +1017,11 @@ def _classify(low: str, s: int, e: int, a: int, b: int):
 SPECIFIC_EXAMS = ("midterm", "final", "quiz")
 
 
-def _refine(best: Optional[str], low: str, s: int, title_low: str) -> Optional[str]:
+def _refine(best: Optional[str], low: str, s: int, title_low: str, sentence_low: str = "") -> Optional[str]:
     """Cümlede sadece genel 'exam/sınav' geçiyorsa ('The exam will be held on Nov 17'), önceki cümleye ve
     duyuru başlığına bakıp hangi sınav olduğunu bul (Midterm Date Updated → midterm)."""
+    if best is None and re.search(r"session|oturum", sentence_low) and RE_REVIEW.search(low[max(0, s - 220):s]):
+        return "review"  # "The session will now take place on Nov 3": hangi oturum olduğu önceki cümlede
     if best != "exam":
         return best
     ctx_a = max(0, s - 220)
@@ -1084,7 +1094,7 @@ def regex_dates(text: str, posted: Optional[int] = None, title: str = "") -> Lis
         # makul aralık dışı tarihleri at (dönem içi)
         if not (today - timedelta(days=60) <= d.date() <= today + timedelta(days=200 if not year else 365)):
             continue
-        best = _refine(_classify(low, s, e, a, b), low, s, title_low)
+        best = _refine(_classify(low, s, e, a, b), low, s, title_low, low[a:b])
         if best is None and not strong:
             continue  # "3.5" gibi anlamsız sayıları ele
         taken_spans.append((s, e))
@@ -1111,7 +1121,7 @@ def regex_dates(text: str, posted: Optional[int] = None, title: str = "") -> Lis
             a, b = _span(text, s, e)
             if any(a <= ts < b for ts, te in taken_spans):
                 continue  # cümlede zaten açık tarih var
-            best = _refine(_classify(low, s, e, a, b), low, s, title_low)
+            best = _refine(_classify(low, s, e, a, b), low, s, title_low, low[a:b])
             if best is None:
                 continue
             if not (today - timedelta(days=7) <= d.date() <= today + timedelta(days=60)):
@@ -1140,16 +1150,24 @@ def tr_date(ds: str) -> str:
     return f"{d.day} {AY_KISA[d.month - 1]} {GUN_KISA[d.weekday()]}"
 
 
+# "Exam review session", "Quiz 1 objection", "sınav kağıdı inceleme": sınavın kendisi değil, sonrası
+RE_EXAM_AFTERMATH = re.compile(r"objection|itiraz|review|grades?(?![^\W\d_])|results?(?![^\W\d_])|papers?(?![^\W\d_])|"
+                               r"viewing|re-?evaluation|scheduler|notlar|sonuç|kağıt|inceleme", re.I)
+
+
 def is_exam(e: Dict[str, Any]) -> bool:
     t = (e.get("type") or "").lower()
-    return t in ("midterm", "final", "quiz", "exam") or "quiz" in t or bool(EXAM_RE.search(e.get("title") or ""))
+    title = e.get("title") or ""
+    return t in ("midterm", "final", "quiz", "exam") or "quiz" in t or \
+        bool(EXAM_RE.search(title) and not RE_EXAM_AFTERMATH.search(title))
 
 
 E = html.escape
 STOPWORDS = {"due", "is", "closes", "close", "opens", "open", "kapanış", "açılış", "son", "teslim", "tarihi",
              "the", "submission", "deadline", "assignment", "ödev", "quiz"}
 TYPE_LABEL = {"midterm": "Ara sınav", "final": "Final", "quiz": "Quiz", "exam": "Sınav", "assignment": "Ödev",
-              "project": "Proje", "presentation": "Sunum", "lab": "Lab", "class_change": "Ders değişikliği"}
+              "project": "Proje", "presentation": "Sunum", "lab": "Lab", "class_change": "Ders değişikliği",
+              "review": "İtiraz/inceleme"}
 
 
 def _norm_title(t: str) -> str:

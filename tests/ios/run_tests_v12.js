@@ -103,8 +103,8 @@ global.config = { widgetFamily: "small" }
   await A.scheduleReminders(st, m.all)
   check("hatırlatma: teslim edilmemiş ödev (21:00) ve kapanış (22:00); teslim edilen ve sınav yok",
     scheduled.map(s => [s.title, s.body, fmt(s.at)]).sort(),
-    [["⏰ IE306 · Self-study Material 2 Responses (kapanış)", "Yarın 08:31 son.", "11/10 22:00"],
-     ["⏰ IE306 · Self-study Material 3", "Bugün 23:59 son.", "11/10 21:00"]])
+    [["⏰ IE306 · Bugün 23:59 son", "Self-study Material 3", "11/10 21:00"],
+     ["⏰ IE306 · Yarın 08:31 son", "Self-study Material 2 Responses (kapanış)", "11/10 22:00"]])
   // aynı gün tekrar çalışınca aynı kimlikle yeniden planlanır (çift bildirim olmaz)
   const ids1 = scheduled.map(s => s.id).sort(); scheduled.length = 0
   await A.scheduleReminders(st, A.buildModel(st, new Date(clock)).all)
@@ -112,7 +112,7 @@ global.config = { widgetFamily: "small" }
   // 21:30: ödev hatırlatması çaldı → tekrar planlanmaz
   clock = new Date(2026, 10, 10, 21, 30).getTime(); scheduled.length = 0
   await A.scheduleReminders(st, A.buildModel(st, new Date(clock)).all)
-  check("hatırlatma: çalan tekrar planlanmaz", scheduled.map(s => s.title), ["⏰ IE306 · Self-study Material 2 Responses (kapanış)"])
+  check("hatırlatma: çalan tekrar planlanmaz", scheduled.map(s => s.body), ["Self-study Material 2 Responses (kapanış)"])
   // öğrenci ödevi teslim etti → bekleyen hatırlatma iptal
   clock = FROZEN.getTime(); st.reminders = {}; scheduled.length = 0
   await A.scheduleReminders(st, A.buildModel(st, new Date(clock)).all)
@@ -121,7 +121,7 @@ global.config = { widgetFamily: "small" }
   scheduled.length = 0; removed.length = 0
   m = A.buildModel(st, new Date(clock))
   await A.scheduleReminders(st, m.all)
-  check("hatırlatma: teslim edilince iptal", [removed.length, scheduled.map(s => s.title)], [1, ["⏰ IE306 · Self-study Material 2 Responses (kapanış)"]])
+  check("hatırlatma: teslim edilince iptal", [removed.length, scheduled.map(s => s.body)], [1, ["Self-study Material 2 Responses (kapanış)"]])
   check("bildirim metni: bugünkü teslimler tamam", A.notificationText(m).split("\n")[0], "📌 Bugünkü teslimler tamam ✓")
   // kapatılınca hepsi iptal
   st.settings.deadlineReminders = false; removed.length = 0; scheduled.length = 0
@@ -132,7 +132,7 @@ global.config = { widgetFamily: "small" }
   clock = new Date(2026, 10, 11, 15, 0).getTime(); st.reminders = {}; scheduled.length = 0; M.submitted[52] = false
   A.ingest(st, await A.collect("https://m", "tok", st.replyCache))
   await A.scheduleReminders(st, A.buildModel(st, new Date(clock)).all)
-  check("hatırlatma: 3 saatten az kaldıysa hemen", scheduled.map(s => [s.title, fmt(s.at), s.body]), [["⏰ AD216 · 5th Exercise", "11/11 15:01", "Bugün 17:00 son."]])
+  check("hatırlatma: 3 saatten az kaldıysa hemen", scheduled.map(s => [s.title, fmt(s.at), s.body]), [["⏰ AD216 · Bugün 17:00 son", "11/11 15:01", "5th Exercise"]])
 
   // ---- teslim durumu API'si kapalıysa: çökmez, uyarı üretmez, hatırlatma yine çalışır
   M.statusFails = true; A.WARNINGS.length = 0

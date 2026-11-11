@@ -33,7 +33,7 @@ const POSTED_MON = ts(2026, 11, 2, 10)
     ["time before date", "Quiz at 09:15 on Nov 12.", null, "", [["2026-11-12", "09:15", "quiz"]]],
     ["grades not exam", "Quiz 1 grades were announced on 3 November.", null, "", [["2026-11-03", null, "other"]]],
     ["topics not exam", "Midterm topics will be discussed on November 9 in PS.", null, "", [["2026-11-09", null, "other"]]],
-    ["objection not exam", "Quiz 1 objection until November 7.", null, "", [["2026-11-07", null, "other"]]],
+    ["objection not exam", "Quiz 1 objection until November 7.", null, "", [["2026-11-07", null, "review"]]],
     ["will be announced", "Quiz 2 date will be announced on November 10.", null, "", [["2026-11-10", null, "other"]]],
     ["seat assignment", "You will be assigned specific classes and seats for the exam. The assignment will be announced tomorrow morning.", POSTED_MON, "", []],
     ["yarınki", "Yarınki quiz 10:00'da NH101'de.", POSTED_MON, "", [["2026-11-03", "10:00", "quiz"]]],
