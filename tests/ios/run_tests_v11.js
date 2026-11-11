@@ -78,7 +78,7 @@ const FROZEN = new Date(2026, 10, 10, 12, 0), NOW = Math.floor(FROZEN / 1000), D
   const rec = m.other.find(o => o.title.startsWith("Recordings"))
   check("1.0.0 kaydında metin yokken arşivden fark", [rec.updated, rec.change], [true, "+ R8"])
   const html = A.briefHtml(m)
-  check("html: notlar bölümü, tür adları", [html.includes("Yeni notlar (1)"), html.includes("85/100"), html.includes("Well done"), html.includes("sayfa metni"), html.includes("+ R8"), html.includes("etkinlik (")], [true, true, true, true, true, false])
+  check("html: notlar bölümü, tür adları", [html.includes("📊 Notlar"), html.includes("85/100"), html.includes("Well done"), html.includes("sayfa metni"), html.includes("+ R8"), html.includes("etkinlik (")], [true, true, true, true, true, false])
   check("bildirim metninde not", A.notificationText(m).includes("📊 Yeni not: AD216 4th Exercise (Take Home) 85/100"), true)
   check("ödev haftada bir kez", m.week.filter(e => /Homework 5/.test(e.title)).length, 1)
 

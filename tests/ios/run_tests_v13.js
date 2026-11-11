@@ -127,7 +127,7 @@ const REVIEW_ANN = "<p>Dear Math101 students,</p><p>You can find your midterm gr
   check("küçük widget: sıradaki iş saati geçen değil", A.widget(m, st, null).t.slice(0, 3),
     ["🎓 Moodle", "MATH101 Ara sınav · 6 gün", "bugün: MATH101 Meeting with your Teacher, T. Teacher"])
   clock = new Date(2026, 10, 11, 16, 0).getTime()
-  check("bildirim: hepsi geçtiyse", A.notificationText(A.buildModel(st, new Date(clock))).split("\n")[0], "📌 Bugün kalan bir şey yok")
+  check("bildirim: hepsi geçtiyse 'Bugün' satırı hiç yazılmaz", A.notificationText(A.buildModel(st, new Date(clock))).split("\n")[0], "🎯 MATH101 Ara sınav · 17 Kas Sal (6 gün)")
 
   // ---- takvimdeki "exam review" kaydı sınavlar listesine girmez; 3'ten fazla iş "+N" olur
   clock = MORNING.getTime()

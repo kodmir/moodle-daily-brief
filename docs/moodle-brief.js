@@ -12,7 +12,7 @@
 // Kayıtlar asla silinmez; eskiyen ya da Moodle'dan kalkan öğeler sadece gösterilmez.
 // ------------------------------------------------------------------------------------------
 
-const VERSION = "1.4.0"
+const VERSION = "1.5.0"
 const RULES = "2"                        // tarih çıkarma kuralları değişince artar: kayıtlı duyurular yeniden taranır
 const DEFAULT_URL = "https://moodle.bogazici.edu.tr"
 const KC_TOKEN = "moodlebrief.token"
@@ -177,7 +177,7 @@ function gradesFromTable(res) {
     const rid = String(cell.id || "").match(/row_(\d+)_/)
     const rng = row.range && typeof row.range === "object" ? htmlToText(row.range.content) : ""
     const mx = rng.match(/\d+(?:[.,]\d+)?/g)
-    out.push({ id: rid ? rid[1] : "n" + hash(name), itemname: name, graderaw: grade, gradeformatted: grade,
+    out.push({ id: rid ? rid[1] : "n" + hash(name), itemname: name.replace(/^Manual item\s+(?=\S)/, ""), graderaw: grade, gradeformatted: grade,
       grademax: mx ? Number(mx[mx.length - 1].replace(",", ".")) : null,
       feedback: row.feedback && typeof row.feedback === "object" ? row.feedback.content : "" })
   }
@@ -604,7 +604,9 @@ function supersede(evs) {
     const keep = g.filter(x => (x.posted || 0) === newest)
     const keepDates = new Set(keep.map(x => x.date))
     const old = [...new Set(g.filter(x => (x.posted || 0) !== newest).map(x => x.date))].filter(d => !keepDates.has(d)).sort()
-    keep.forEach(x => { if (old.length) x.changed_from = old[old.length - 1] })
+    // uyarı, değişiklik tazeyken ya da eski tarih henüz geçmemişken işe yarar; sonrası tekrar olur
+    const fresh = newest > now() / 1000 - STALE_DAYS * 86400 || (old.length > 0 && daysBetween(now(), old[old.length - 1]) >= 0)
+    keep.forEach(x => { if (old.length && fresh) x.changed_from = old[old.length - 1] })
     out.push(...keep)
   }
   return out
@@ -728,7 +730,8 @@ function ingest(st, data) {
       st.firstSeen[it.key] = { t: quiet ? (it.time || 0) : nowTs, updated: Boolean(prev) && !first }
       arch.push({ at: nowTs, key: it.key, version: it.version, course: it.course, kind: it.kind, title: it.title,
         time: it.time, text: it.text, events: ex.events })
-      if (!quiet && (it.kind.startsWith("duyuru") || it.kind === "not")) fresh.push(it)
+      if (!quiet && (it.kind.startsWith("duyuru") || it.kind === "not") &&
+        !isStale({ kind: it.kind, posted: ex.posted, events: ex.events, updated: Boolean(prev), change: ex.change }, now())) fresh.push(it)
       st.seen[it.key] = it.version
     } else if (rescan && st.extracted[it.key] && !it.file) {
       st.extracted[it.key].events = freeExtract(it).events      // eski kuralların yanlış okuduğu tarihler düzelir
@@ -784,6 +787,105 @@ function dedupeNews(items) {
   }
   return items.filter(n => !drop.has(n.key))
 }
+// ---- özet: duyurunun metni değil içindeki kritik bilgi; eskimiş haber ve tekrarlar yazılmaz
+const ANN_KINDS = ["duyuru", "mesaj", "duyuru cevabı"]
+const TEXT_KINDS = [...ANN_KINDS, "forum", "forum cevabı", "bildirim"]
+const STALE_DAYS = 7
+const whenTxt = (d, t, n) => (n === 0 ? "bugün" : n === 1 ? "yarın" : trDate(d)) + (t ? " " + t : "")
+// Bir duyurudaki bugün ya da ileriye dönük tarihli olaylar: "Ara sınav bugün 14:00". Geçmiş tarihler yazılmaz.
+function annFacts(events, asOf, limit = 3) {
+  const rows = []
+  for (const e of events || []) {
+    if (!e || !/^\d{4}-\d{2}-\d{2}$/.test(e.date || "")) continue
+    let d = fromYmd(e.date), t = e.time || null
+    if (t === "00:00") { d = addDays(d, -1); t = "23:59" }
+    const n = daysBetween(asOf, ymd(d))
+    if (n >= 0) rows.push({ d, t, n, e })
+  }
+  rows.sort((a, b) => (a.d - b.d) || String(a.t || "99").localeCompare(String(b.t || "99")))
+  const out = []
+  for (const r of rows) {
+    const typ = r.e.type || "other"
+    const fact = TYPE_LABEL[typ] ? `${TYPE_LABEL[typ]} ${whenTxt(r.d, r.t, r.n)}` : cut(String(r.e.title || "").trim(), 90)
+    if (fact && !out.includes(fact)) out.push(fact)
+  }
+  return out.slice(0, limit)
+}
+// Eski tarihli ve artık işe yaramayan haber: bir haftadan eski duyuru/ileti, içinde bugün ya da ileriye dönük
+// tarih yok, metninde gösterilebilir bir değişiklik de yok. Kayıt silinmez, sadece özete girmez.
+function isStale(n, asOf) {
+  if (!TEXT_KINDS.includes(n.kind)) return false
+  if (!n.posted || n.posted > asOf / 1000 - STALE_DAYS * 86400) return false
+  if (n.updated && n.change) return false
+  return annFacts(n.events, asOf, 1).length === 0
+}
+// Tarihli bilgi çıkmayan duyuru için tek kısa cümle (selam satırı atlanır)
+function gist(text, limit = 90) {
+  const body = stripHello(String(text || "").replace(/^Gönderen:[\s\S]*?\n\n/, "")).trim()
+  const first = body ? body.split(/(?<=[.!?])\s+|\n/)[0] : ""
+  return cut(first.replace(/\s+/g, " ").trim(), limit)
+}
+const FILLER = new Set(("the a an has have had been is are was were be to on in at for of and or it this that now please you your can " +
+  "find see check uploaded posted announced available shared published added attached moodle page course " +
+  "yüklendi yüklenmiştir paylaşıldı paylaşılmıştır duyuruldu eklendi eklenmiştir sisteme sayfasına bulabilirsiniz " +
+  "ve ile için bir").split(" "))
+// Cümle başlığın söylediğinden fazlasını söylüyor mu? "Seating Plan for MT2 has been uploaded to Moodle" başlığın
+// tekrarıdır; "Office hours moved to TB215" değildir.
+function addsToTitle(sentence, title) {
+  const words = t => lowerEn(t).replace(/[^\p{L}\p{N}_ ]+/gu, " ").split(/\s+/).filter(Boolean)
+  const have = new Set([...words(title), ...FILLER])
+  return words(sentence).some(w => !have.has(w))
+}
+function annLines(a, asOf) {
+  let facts = annFacts(a.events, asOf)
+  if (a.updated && a.change) facts = ["✏️ " + cut(a.change, 90), ...facts]
+  else if (!facts.length) { const g = gist(a.text); if (addsToTitle(g, a.title)) facts = [g] }
+  return facts
+}
+// "Yeni içerik"ten tekrarlar çıkar: takvim kaydı zaten Bugün/Bu hafta'daysa, bildirim zaten gösterilen bir öğenin haberiyse
+function filterOther(other, shown, asOf) {
+  const titles = shown.filter(x => x.kind !== "bildirim").map(x => String(x.title || "").trim().toLowerCase()).filter(t => t.length >= 4)
+  const annTitles = new Set(shown.filter(x => ANN_KINDS.includes(x.kind)).map(x => x.course + "|" + String(x.title || "").trim().toLowerCase()))
+  return other.filter(n => {
+    if (annTitles.has(n.course + "|" + baseTitle(n))) return false      // duyurusu zaten yazılan dosya/etkinlik
+    if (n.kind === "takvim") {
+      const ds = String(n.text || "").slice(0, 10)
+      if (/^\d{4}-\d{2}-\d{2}$/.test(ds) && daysBetween(asOf, ds) <= 7) return false
+    }
+    if (n.kind === "bildirim") { const low = String(n.title || "").toLowerCase(); if (titles.some(t => low.includes(t))) return false }
+    return true
+  })
+}
+// Yeni dosya/etkinlikleri ders başına tek satıra indirir: "5 dosya (L7, L8, L9, +2) · quiz: Quiz 3"
+function groupOther(items, maxLines = 6) {
+  const bases = {}
+  for (const n of items) { const k = n.course + "|" + baseTitle(n); bases[k] = (bases[k] || 0) + 1 }
+  const by = new Map()
+  for (const n of items) {
+    let title = shortTitle(n, 40)
+    const full = String(n.title || "")
+    if (full.includes(" / ") && bases[n.course + "|" + baseTitle(n)] > 1) title = cut(full.split(" / ").slice(1).join(" / "), 40)
+    else if (title.includes(" / ")) title = cut(title.split(" / ")[0], 40)
+    if (n.kind === "takvim") {
+      const ds = String(n.text || "").slice(0, 10)
+      if (/^\d{4}-\d{2}-\d{2}$/.test(ds)) { const d = fromYmd(ds); title += ` (${d.getDate()} ${AY_KISA[d.getMonth()]})` }
+    }
+    if (n.updated) title += n.change ? ` (✏️ ${cut(n.change, 60)})` : " ✏️"
+    if (!by.has(n.course)) by.set(n.course, new Map())
+    const labs = by.get(n.course), lab = kindTr(n.kind)
+    if (!labs.has(lab)) labs.set(lab, [])
+    labs.get(lab).push(title)
+  }
+  const lines = []
+  for (const [course, labs] of by) {
+    const parts = []
+    for (const [lab, ts] of labs) parts.push(lab.toLowerCase() === course.toLowerCase()
+      ? ts.slice(0, 3).join(", ") + (ts.length > 3 ? `, +${ts.length - 3}` : "")          // "Bildirim bildirim:" demeyelim
+      : ts.length <= 3 ? `${lab}: ${ts.join(", ")}` : `${ts.length} ${lab} (${ts.slice(0, 3).join(", ")}, +${ts.length - 3})`)
+    lines.push({ course, text: parts.join(" · ") })
+  }
+  return lines.length > maxLines ? [...lines.slice(0, maxLines), { course: "", text: `… ve ${lines.length - maxLines} ders daha` }] : lines
+}
 function buildModel(st, asOf) {
   const doc = []
   for (const [k, ex] of Object.entries(st.extracted)) {
@@ -799,13 +901,14 @@ function buildModel(st, asOf) {
     .map(([k, f]) => ({ key: k, ...st.extracted[k], updated: f.updated, t: f.t }))
   const seenNews = new Set(), uniq = []
   for (const n of news.sort((a, b) => b.t - a.t)) {
+    if (isStale(n, asOf)) continue
     const sig = n.course + "|" + (n.title || "").toLowerCase() + "|" + hash(n.text || n.key).slice(0, 8)
     if (!seenNews.has(sig)) { seenNews.add(sig); uniq.push(n) }
   }
   const merged = dedupeNews(uniq)
-  const ann = merged.filter(n => ["duyuru", "duyuru cevabı", "mesaj"].includes(n.kind))
+  const ann = merged.filter(n => ANN_KINDS.includes(n.kind))
   const grades = merged.filter(n => n.kind === "not")
-  const other = merged.filter(n => !ann.includes(n) && !grades.includes(n))
+  const other = filterOther(merged.filter(n => !ann.includes(n) && !grades.includes(n)), merged, asOf)
   return { asOf, todays, exams, week, ann, grades, other, all: evs, user: st.user }
 }
 function label(e) {
@@ -830,7 +933,7 @@ function notificationText(m) {
   const live = m.todays.filter(e => !e._past), open = live.filter(e => !e.done)
   lines.push(open.length ? "📌 Bugün: " + open.slice(0, 3).map(e => `${e._t ? e._t + " " : ""}${e.course} ${cutLabel(label(e), 34)}`).join(" · ") +
       (open.length > 3 ? ` · +${open.length - 3}` : "")
-    : live.length ? "📌 Bugünkü teslimler tamam ✓" : m.todays.length ? "📌 Bugün kalan bir şey yok" : "📌 Bugün kayıtlı bir şey yok")
+    : live.length ? "📌 Bugünkü teslimler tamam ✓" : "")
   if (m.exams.length) {
     const e = m.exams[0]
     lines.push(`🎯 ${e.course} ${label(e)} · ${trDate(e._d)} (${left(e._n)})${e.changed_from ? " ⚠️ tarih değişti" : ""}`)
@@ -838,8 +941,13 @@ function notificationText(m) {
   const wk = m.week.filter(e => !e.done)
   if (wk.length) lines.push(`📅 Bu hafta ${wk.length} teslim/etkinlik`)
   if (m.grades.length) lines.push(`📊 Yeni not: ` + m.grades.slice(0, 2).map(g => `${g.course} ${g.title} ${String(g.text || "").split("\n")[0]}`).join(" · "))
-  if (m.ann.length) lines.push(`📣 ${m.ann.length} yeni duyuru: ` + m.ann.slice(0, 2).map(a => `${a.course} ${a.title}`).join(" · "))
-  return lines.join("\n")
+  if (m.ann.length) lines.push("📣 " + m.ann.slice(0, 2).map(a => {
+    const f = annFacts(a.events, m.asOf, 1)[0]
+    return `${a.course} ${cut(a.title || "", 40)}${f && f.length <= 40 ? " → " + f : ""}`
+  }).join(" · ") + (m.ann.length > 2 ? ` · +${m.ann.length - 2}` : ""))
+  if (m.other.length) lines.push(`🆕 ${m.other.length} yeni içerik`)
+  // bir şey yoksa satırı da yok; hiçbir şey yoksa tek cümle
+  return lines.filter(Boolean).join("\n") || "Bugün için kayıtlı bir şey ve yeni içerik yok."
 }
 
 // Uygulama içi tam brifing (HTML)
@@ -861,22 +969,20 @@ function briefHtml(m) {
     weekHtml += evLi(e, false)
   }
   if (cur) weekHtml += "</ul>"
-  const annHtml = m.ann.map(a => {
-    const body = String(a.text || "").replace(/^Gönderen:[\s\S]*?\n\n/, "").trim()
-    return `<div class=ann><b>${esc(a.course)} · ${esc(a.title)}</b>${a.updated ? " <i>(güncellendi)</i>" : ""}` +
-      `${a.updated && a.change ? `<div class=w>✏️ değişen: ${esc(a.change)}</div>` : ""}` +
-      `<p>${esc(body.slice(0, 600))}${body.length > 600 ? "…" : ""}</p>${a.url ? `<a href="${esc(a.url)}">Moodle'da aç</a>` : ""}</div>`
-  }).join("")
+  // duyurunun metni değil, içindeki kritik bilgi; tamamı için başlığa dokunulur
+  const annHtml = m.ann.slice(0, 12).map(a => {
+    const title = esc(cut(a.title || "", 70))
+    return `<div class=ann><b>${esc(a.course)} · ${a.url ? `<a href="${esc(a.url)}">${title}</a>` : title}</b>${a.updated ? " <i>(güncellendi)</i>" : ""}` +
+      annLines(a, m.asOf).map(f => `<div class=f>→ ${esc(f)}</div>`).join("") + `</div>`
+  }).join("") + (m.ann.length > 12 ? `<div class=empty>… ve ${m.ann.length - 12} duyuru daha</div>` : "")
   const gradeHtml = li(m.grades.slice(0, 15).map(g => {
     const lines = String(g.text || "").split("\n"), fb = lines.slice(1).join(" ").replace(/\s+/g, " ").trim()
     return `<li><b>${esc(g.course)}</b> ${esc((g.title || "").slice(0, 60))}: <b>${esc(lines[0])}</b>${g.updated ? " <i>(değişti)</i>" : ""}` +
-      `${fb ? `<div class=d>${esc(fb.slice(0, 140))}</div>` : ""}</li>`
+      `${fb ? `<div class=d>${esc(cut(fb, 100))}</div>` : ""}</li>`
   }))
-  const otherHtml = li(m.other.slice(0, 25).map(o => {
-    const chg = o.updated && o.change
-    return `<li>${esc(o.course)} · ${esc(kindTr(o.kind))}: ${esc(shortTitle(o, chg ? 38 : 70))}` +
-      `${chg ? ` — <i>${esc(o.change)}</i>` : (o.updated ? " <i>(güncellendi)</i>" : "")}</li>`
-  }))
+  const otherHtml = li(groupOther(m.other).map(g => `<li>${g.course ? `<b>${esc(g.course)}</b> ` : ""}${esc(g.text)}</li>`))
+  const approx = [...m.todays, ...m.exams, ...m.week].some(e => e.certainty === "approximate")
+  const nothing = !m.todays.length && !m.exams.length && !weekHtml && !m.grades.length && !m.ann.length && !m.other.length
   const d = m.asOf
   return `<!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
 <style>
@@ -886,17 +992,17 @@ h1{font-size:26px;margin:4px 0 2px}h2{font-size:17px;margin:22px 0 6px}ul{paddin
 .d{color:#666}.w{color:#d97706;font-size:14px}.day{font-weight:600;margin-top:8px}.ann{background:#f2f2f7;border-radius:12px;padding:10px 12px;margin:8px 0}
 .upd{background:#0a84ff;color:#fff;border-radius:10px;padding:8px 12px;margin-bottom:10px;font-size:15px}.upd a{color:#fff;font-weight:600}
 .ok{color:#1a7f45;font-size:14px}.q{color:#777;font-size:14px;font-style:italic}.src{font-size:14px;white-space:nowrap}
-.ann p{margin:6px 0;white-space:pre-wrap}.empty{color:#888}.foot{color:#888;font-size:13px;margin-top:24px}a{color:#0a84ff}
+.ann .f{margin-top:3px;font-size:15px}.ann a{text-decoration:none}.empty{color:#888}.foot{color:#888;font-size:13px;margin-top:24px}a{color:#0a84ff}
 </style></head><body>
 <h1>☀️ ${d.getDate()} ${AY_KISA[d.getMonth()]} ${GUN[d.getDay()]}</h1>
-${S("📌 Bugün", m.todays.length ? li(m.todays.map(e => evLi(e, false))) : "<div class=empty>Kayıtlı bir şey yok</div>")}
-${S("🎯 Sınavlar", m.exams.length ? li(m.exams.map(e => evLi(e, true))) : "<div class=empty>Kayıtlı sınav yok</div>")}
-${S("📅 Bu hafta", weekHtml || "<div class=empty>Teslim yok</div>")}
-${m.grades.length ? S(`📊 Yeni notlar (${m.grades.length})`, gradeHtml) : ""}
-${m.ann.length ? S(`📣 Yeni duyurular (${m.ann.length})`, annHtml) : ""}
-${m.other.length ? S(`🆕 Diğer (${m.other.length})`, otherHtml) : ""}
-${!m.ann.length && !m.other.length && !m.grades.length ? `<h2>🆕 Son 24 saatte yeni bir şey yok</h2>` : ""}
-<div class=foot>❔ = duyuru metninden çıkarıldı, teyit et<br>Moodle Brief ${VERSION} · veriler sadece bu telefonda</div>
+${m.todays.length ? S("📌 Bugün", li(m.todays.map(e => evLi(e, false)))) : ""}
+${m.exams.length ? S("🎯 Sınavlar", li(m.exams.map(e => evLi(e, true)))) : ""}
+${weekHtml ? S("📅 Bu hafta", weekHtml) : ""}
+${m.grades.length ? S("📊 Notlar", gradeHtml) : ""}
+${m.ann.length ? S("📣 Duyurular", annHtml) : ""}
+${m.other.length ? S("🆕 Yeni içerik", otherHtml) : ""}
+${nothing ? `<div class=empty style="margin-top:18px">Bugün için kayıtlı bir şey ve yeni içerik yok.</div>` : ""}
+<div class=foot>${approx ? "❔ = duyuru metninden çıkarıldı, teyit et<br>" : ""}Moodle Brief ${VERSION} · veriler sadece bu telefonda</div>
 </body></html>`
 }
 
@@ -1021,23 +1127,31 @@ function cmpVer(a, b) {
 // sunucusudur. Ulaşılamazsa sessizce geçer; brifing her hâlükârda çalışır.
 async function checkUpdate(st) {
   if (st.settings.updateCheck === false) return null
+  // kullanıcı betiği güncellediyse kayıttaki "yeni sürüm var" bilgisi hemen düşer (yoksa şerit 20 saat daha kalırdı)
+  if (st.updateReady && cmpVer(VERSION, st.updateReady.version) >= 0) delete st.updateReady
   const nowMs = now().getTime()
   if (st.updateCheckedAt && nowMs - st.updateCheckedAt < 20 * 3600 * 1000) return st.updateReady || null
-  st.updateCheckedAt = nowMs
   let info
-  try { info = await httpGet(UPDATE_URL) } catch (e) { return st.updateReady || null }
+  try { info = await httpGet(UPDATE_URL) }
+  catch (e) { st.updateCheckedAt = nowMs - 19 * 3600 * 1000; return st.updateReady || null }   // ulaşılamadı: 1 saat sonra yine dene
+  st.updateCheckedAt = nowMs
   const v = info && typeof info.version === "string" ? info.version.trim() : ""
   if (!/^\d+(?:\.\d+){0,3}$/.test(v) || cmpVer(VERSION, v) >= 0) { delete st.updateReady; return null }
   st.updateReady = { version: v, notes: String((info && info.notes) || "").replace(/\s+/g, " ").trim().slice(0, 200) }
   if (st.updateNotified !== v) {
-    st.updateNotified = v
     const n = new Notification()
     n.identifier = NOTIF_UPDATE
     n.threadIdentifier = "moodlebrief"
     n.title = `⬆️ Moodle Brief ${v} çıktı (sende ${VERSION})`
     n.body = (st.updateReady.notes ? st.updateReady.notes + "\n" : "") + "Kurulum sayfasını aç, kodu kopyalayıp betiğin üstüne yapıştır."
     n.openURL = INSTALL_URL
+    const at = now()                       // widget gece de çalışır: 23:00–08:00 arasında bulunduysa sabah 09:00'da bildir
+    if (at.getHours() >= 23 || at.getHours() < 8) {
+      const d = at.getHours() >= 23 ? addDays(at, 1) : at
+      n.setTriggerDate(new Date(d.getFullYear(), d.getMonth(), d.getDate(), 9, 0))
+    }
     await n.schedule()
+    st.updateNotified = v                  // ancak bildirim kurulduysa "bildirildi" say
   }
   return st.updateReady
 }
@@ -1269,7 +1383,7 @@ async function settings(st, base) {
 if (typeof __TEST__ !== "undefined") {
   __EXPORTS__.api = { regexDates, freeExtract, supersede, mergedEvents, buildModel, ingest, notificationText, briefHtml,
     shortCourse, examSlot, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setGet: f => { httpGet = f }, setFm: f => { fm = f },
-    loadState, saveState, nextSendDate, reminderTime, scheduleReminders, instantNotify, remKind, stripHello, checkUpdate, cmpVer, settings, VERSION, widget, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr, gradesFromTable }
+    loadState, saveState, nextSendDate, reminderTime, scheduleReminders, instantNotify, remKind, stripHello, checkUpdate, cmpVer, settings, VERSION, annFacts, isStale, gist, addsToTitle, filterOther, groupOther, widget, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr, gradesFromTable }
 } else {
   await main()
   Script.complete()

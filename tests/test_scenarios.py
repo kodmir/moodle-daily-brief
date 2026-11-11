@@ -161,7 +161,7 @@ def test_one_brief_per_day_and_reply_cache(env):
     new_day(mb)
     run(mb, "run", "--force")
     assert moodle.post_calls == calls                                 # unchanged thread not re-fetched
-    assert "yeni bir şey yok" in tg.last
+    assert "DUYURULAR" not in tg.last and "YENİ İÇERİK" not in tg.last   # nothing new: nothing is said about it
 
 
 def test_newer_announcement_supersedes_older_date(env):
@@ -202,8 +202,8 @@ def test_removed_announcement_is_hidden_not_deleted(env):
         run(mb, "run", "--force")
     st = json.loads(mb.STATE_FILE.read_text())
     assert st["extracted"]["disc:103"]["hidden"] is True               # still stored
-    assert "KALDIRILANLAR" in tg.last
-    assert "Quiz 3" not in tg.last.split("KALDIRILANLAR")[0]
+    assert "Moodle'dan kaldırıldı" in tg.last
+    assert "Quiz 3" not in tg.last.split("Moodle'dan kaldırıldı")[0]
     moodle.posts.append((103, 1, "Quiz", "Quiz 3 on November 20.", NOW - DAY))
     new_day(mb)
     run(mb, "run", "--force")
@@ -317,7 +317,7 @@ def test_rule_change_rescans_stored_items_without_flooding(env):
     mb.save_state(st)
     run(mb, "run", "--force")
     assert [e["type"] for e in mb.load_state()["extracted"]["disc:301"]["events"]] == ["review"]
-    assert "yeni bir şey yok" in tg.last and "güncellendi" not in tg.last
+    assert "DUYURULAR" not in tg.last and "YENİ İÇERİK" not in tg.last and "güncellendi" not in tg.last
 
 
 def test_is_exam_ignores_post_exam_sessions(mb):
@@ -327,6 +327,134 @@ def test_is_exam_ignores_post_exam_sessions(mb):
     assert not mb.is_exam({"type": "course", "title": "Exam 1 review and objections"})
     assert not mb.is_exam({"type": "review", "title": "The objection session for Quiz 1 will be held on Monday"})
     assert not mb.is_exam({"type": "scheduler", "title": "Meeting with your Teacher"})
+
+
+# ---------------------------------------------------------------- the brief is a summary of the Moodle feed
+
+def test_empty_sections_are_not_printed(env):
+    mb, moodle, tg = env
+    moodle.posts = []
+    moodle.modules = []
+    run(mb, "run")
+    new_day(mb)
+    run(mb, "run", "--force")
+    msg = plain(tg.last)
+    for word in ("Teslim yok", "Kayıtlı sınav yok", "Kayıtlı bir şey yok", "yeni bir şey yok", "SINAVLAR", "BUGÜN", "DUYURULAR"):
+        assert word not in msg
+    assert "BU HAFTA" in msg and "Survey (kapanış)" in msg             # what does exist is still listed
+
+
+def test_nothing_at_all_still_says_so_once(mb):
+    out = mb.free_brief({"moodle_calendar_and_deadlines": [], "dates_found_in_documents": []}, [])
+    assert out.count("\n") == 2 and out.endswith("Bugün için kayıtlı bir şey ve yeni içerik yok.")
+
+
+def test_announcement_shows_the_key_fact_not_the_body(env):
+    mb, moodle, tg = env
+    run(mb, "run")
+    body = ("<p>Dear all,</p><p>The Class & Seating Plan for MT2 has been uploaded to Moodle. Please check your classroom "
+            "and assigned seat before coming to the exam. Phones are strictly prohibited during the exam and you must "
+            "bring your student ID card with you.</p><p>Quiz 3 will be held on November 9 at 12:00 in M100.</p>")
+    moodle.posts.append((401, 1, "Class & Seating Plan for MT2", body, NOW - 60))
+    moodle.posts.append((402, 2, "Office hours", "<p>Hello,</p><p>Office hours moved to TB215. See you there.</p>", NOW - 60))
+    new_day(mb)
+    run(mb, "run", "--force")
+    import html
+    ann = html.unescape(plain(tg.last)).split("DUYURULAR")[1].split("🆕")[0]
+    assert "IE202 · Class & Seating Plan for MT2\n   → Quiz 9 Kas Pzt 12:00" in ann   # the dated fact
+    assert "Phones are strictly prohibited" not in ann and "Dear all" not in ann     # not the body
+    assert "MATH101 · Office hours\n   → Office hours moved to TB215." in ann         # no date: one short sentence
+    assert "See you there" not in ann
+
+
+def test_old_announcement_that_resurfaces_is_not_news(env):
+    mb, moodle, tg = env
+    old = (501, 1, "Class & Seating Plan for MT1", "The seating plan for MT1 on October 16 is uploaded.", NOW - 20 * DAY)
+    moodle.posts.append(old)
+    run(mb, "run")
+    # Moodle reports the old post as changed (a reply bumped it) but its text says nothing new and its date has passed
+    st = mb.load_state()
+    st["seen"]["disc:501"] = "something-else"
+    st["last_sent_date"] = "2000-01-01"
+    mb.save_state(st)
+    run(mb, "run", "--force")
+    assert "Seating Plan for MT1" not in tg.last
+    assert "disc:501" in mb.load_state()["extracted"]                 # still stored, just not in the summary
+    # ...but an old post edited to carry a new, future date is news again
+    moodle.posts[-1] = (501, 1, "Class & Seating Plan for MT1", "The seating plan is uploaded. Make-up exam: November 20 at 10:00.", NOW - 20 * DAY)
+    new_day(mb)
+    run(mb, "run", "--force")
+    assert "Seating Plan for MT1" in tg.last and "20 Kas" in tg.last
+
+
+def test_sentence_that_only_repeats_the_title_is_dropped(mb):
+    assert not mb.adds_to_title("The Class & Seating Plan for MT2 has been uploaded to Moodle.", "Class & Seating Plan for MT2")
+    assert mb.adds_to_title("Office hours moved to TB215.", "Office hours")
+    assert mb.adds_to_title("Tomorrow's class is cancelled.", "About the class")
+    assert not mb.adds_to_title("", "x")
+
+
+def test_file_with_the_same_name_as_its_announcement_is_listed_once(mb):
+    ann = {"key": "disc:1", "kind": "duyuru", "course": "IE306", "title": "Class & Seating Plan for MT2"}
+    f = {"key": "file:1", "kind": "dosya", "course": "IE306", "title": "Class & Seating Plan for MT2 / plan.pdf"}
+    g = {"key": "file:2", "kind": "dosya", "course": "IE306", "title": "Lecture 9 / l9.pdf"}
+    assert [x["key"] for x in mb.filter_other([f, g], [ann, f, g])] == ["file:2"]
+
+
+def test_stale_rule_units(mb):
+    old, recent = NOW - 20 * DAY, NOW - 2 * DAY
+    past = [{"type": "midterm", "date": "2026-10-16", "time": "17:00", "title": "x"}]
+    future = [{"type": "midterm", "date": "2026-11-17", "time": "17:00", "title": "x"}]
+    assert mb.is_stale({"kind": "duyuru", "time": old, "events": past}, NOW)
+    assert mb.is_stale({"kind": "bildirim", "time": old, "events": []}, NOW)
+    assert not mb.is_stale({"kind": "duyuru", "time": recent, "events": past}, NOW)          # recent
+    assert not mb.is_stale({"kind": "duyuru", "time": old, "events": future}, NOW)           # still ahead
+    assert not mb.is_stale({"kind": "duyuru", "time": old, "events": [], "updated": True, "change": "+ Room M100"}, NOW)
+    assert not mb.is_stale({"kind": "not", "time": old, "events": []}, NOW)                  # grades are never dropped
+    assert not mb.is_stale({"kind": "dosya", "time": old, "events": []}, NOW)                # nor newly visible files
+    assert not mb.is_stale({"kind": "duyuru", "time": None, "events": []}, NOW)
+
+
+def test_new_content_is_one_line_per_course(env):
+    mb, moodle, tg = env
+    run(mb, "run")
+    moodle.modules = [{"id": 800 + i, "modname": "resource", "name": f"Lecture {i}",
+                       "contents": [{"type": "file", "filename": f"L{i}.pdf", "filepath": "/", "filesize": 1, "timemodified": NOW}]}
+                      for i in range(1, 6)]
+    moodle.posts.append((601, 1, "Lecture notes", "Lecture notes 1-5 are uploaded.", NOW - 60))
+    new_day(mb)
+    run(mb, "run", "--force")
+    lines = other_lines(tg.last)
+    assert lines == ["• IE202 5 dosya (Lecture 1, Lecture 2, Lecture 3, +2)"]
+    assert "bildirim" not in plain(tg.last)
+
+
+def test_notification_about_a_listed_announcement_is_dropped(mb):
+    ann = {"key": "disc:1", "kind": "duyuru", "course": "MATH101", "title": "Midterm Grades"}
+    dup = {"key": "notif:1", "kind": "bildirim", "course": "Bildirim", "title": "2026/2027-1 MATH101.01: Midterm Grades"}
+    other = {"key": "notif:2", "kind": "bildirim", "course": "Bildirim", "title": "Your submission was graded"}
+    soon = {"key": "cal:1", "kind": "takvim", "course": "IE202", "title": "HW is due", "text": "2026-11-07 10:00 Cumartesi\n"}
+    far = {"key": "cal:2", "kind": "takvim", "course": "IE202", "title": "Project demo", "text": "2026-12-01 10:00 Salı\n"}
+    kept = mb.filter_other([dup, other, soon, far], [ann, dup, other, soon, far])
+    assert [x["key"] for x in kept] == ["notif:2", "cal:2"]
+    assert mb.group_other(kept) == ["• <b>Bildirim</b> Your submission was graded", "• <b>IE202</b> takvim: Project demo (1 Ara)"]
+
+
+def test_date_change_warning_fades_once_it_no_longer_matters(mb):
+    def evs(old_date, new_posted):
+        return mb.supersede([
+            {"course": "IE202", "type": "midterm", "title": "midterm", "date": old_date, "posted": NOW - 60 * DAY},
+            {"course": "IE202", "type": "midterm", "title": "midterm", "date": "2026-11-17", "posted": new_posted}])
+    assert evs("2026-11-11", NOW - 30 * DAY)[0].get("changed_from") == "2026-11-11"   # old date still ahead
+    assert evs("2026-11-01", NOW - 2 * DAY)[0].get("changed_from") == "2026-11-01"    # change is recent
+    assert "changed_from" not in evs("2026-11-01", NOW - 30 * DAY)[0]                 # old news: date only
+    assert evs("2026-11-01", NOW - 30 * DAY)[0]["date"] == "2026-11-17"
+
+
+def test_grade_table_drops_moodle_icon_label(mb):
+    res = {"tables": [{"tabledata": [{"itemname": {"class": "item", "content": "<span>Manual item</span> Exam 1", "id": "row_5_7"},
+                                      "grade": {"content": "31.00"}, "range": {"content": "0–100"}}]}]}
+    assert [(g["id"], g["itemname"]) for g in mb.grades_from_table(res)] == [("5", "Exam 1")]
 
 
 def test_concurrent_runs_are_locked(mb):
@@ -371,8 +499,8 @@ def test_titles_are_unescaped_once(mb):
 # ---------------------------------------------------------------- v1.1: grades, de-duplication, "what changed"
 
 def other_lines(msg):
-    """Lines of the 'DİĞER' section."""
-    part = plain(msg).split("DİĞER", 1)
+    """Lines of the 'YENİ İÇERİK' section (one per course)."""
+    part = plain(msg).split("YENİ İÇERİK", 1)
     return [l for l in part[1].split("\n")[1:] if l.startswith("•")] if len(part) > 1 else []
 
 
@@ -394,11 +522,12 @@ def test_same_thing_is_listed_once(env):
     new_day(mb)
     run(mb, "run", "--force")
     lines = other_lines(tg.last)
-    assert sum("Answers to 4th Exercise" in l for l in lines) == 1
-    assert sum("Homework 5" in l for l in lines) == 1
-    assert any("ödev: Homework 5" in l for l in lines)                 # the assignment wins over module/calendar
-    assert sum("Problem Sets" in l for l in lines) == 2                # two different files stay separate
-    assert not any("etkinlik (" in l for l in lines)                   # readable type names
+    assert len(lines) == 1 and lines[0].startswith("• IE202 ")         # one line per course
+    line = lines[0]
+    assert line.count("Answers to 4th Exercise") == 1
+    assert line.count("Homework 5") == 1 and "ödev: Homework 5" in line  # the assignment wins over module/calendar
+    assert "dosya: Answers to 4th Exercise, PS7.pdf, PS8.pdf" in line  # two files of one folder stay separate
+    assert "etkinlik (" not in line and "takvim" not in line           # readable type names; calendar copy dropped
 
 
 def test_update_shows_what_changed(env):
@@ -443,7 +572,7 @@ def test_new_grade_is_reported_but_old_grades_do_not_flood(env):
     new_day(mb)
     run(mb, "run", "--force")
     msg = plain(tg.last)
-    assert "YENİ NOTLAR (1)" in msg and "IE202 Quiz 2: 85/100" in msg and "Well done" in msg
+    assert "NOTLAR" in msg and "IE202 Quiz 2: 85/100" in msg and "Well done" in msg
     assert "Quiz 1" not in msg and "Course total" not in msg           # old grade and totals stay quiet
     moodle.grades[1][0] = grade(1, "Quiz 1", 75, NOW - 60)             # an objection changed the grade
     new_day(mb)

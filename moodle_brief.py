@@ -428,7 +428,8 @@ def grades_from_table(res: Any) -> List[Dict[str, Any]]:
             rng = html_to_text((row.get("range") or {}).get("content")) if isinstance(row.get("range"), dict) else ""
             mx = re.findall(r"\d+(?:[.,]\d+)?", rng)
             fb = (row.get("feedback") or {}).get("content") if isinstance(row.get("feedback"), dict) else ""
-            out.append({"id": rid.group(1) if rid else "n" + h(name), "itemname": name, "graderaw": grade,
+            shown = re.sub(r"^Manual item\s+(?=\S)", "", name)  # Moodle'ın simge etiketi, kalemin adı değil
+            out.append({"id": rid.group(1) if rid else "n" + h(name), "itemname": shown, "graderaw": grade,
                         "gradeformatted": grade, "grademax": float(mx[-1].replace(",", ".")) if mx else None,
                         "feedback": fb})
     return out
@@ -800,8 +801,10 @@ def supersede(evs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         newest = max(x["posted"] for x in g)
         keep = [x for x in g if x["posted"] == newest]
         old = sorted({x["date"] for x in g if x["posted"] != newest} - {x["date"] for x in keep})
+        # Uyarı, değişiklik tazeyken ya da eski tarih henüz geçmemişken işe yarar; sonrası tekrar olur
+        fresh = newest > datetime.now(TZ).timestamp() - STALE_DAYS * 86400 or bool(old and (days_left(old[-1]) or 0) >= 0)
         for x in keep:
-            if old:
+            if old and fresh:
                 x["changed_from"] = old[-1]
         out.extend(keep)
     return out
@@ -1375,91 +1378,214 @@ def archive_last_text(key: str) -> Optional[str]:
     return _ARCHIVE_LAST.get(key)
 
 
+ANN_KINDS = ("duyuru", "mesaj", "duyuru cevabı")
+TEXT_KINDS = ANN_KINDS + ("forum", "forum cevabı", "bildirim")
+STALE_DAYS = 7
+RE_HELLO = re.compile(r"^\s*(?:dear|hello|hi|merhabalar|merhaba|sevgili|değerli|selamlar|selam|sayın)(?![^\W\d_])"
+                      r"(?:[ \t]+[^\s,!:.]+){0,4}[ \t]*[,!:.]?[ \t]*\n+", re.I)
+
+
+def _cut(s: str, n: int) -> str:
+    s = (s or "").strip()
+    return s if len(s) <= n else re.sub(r"[\s(,.·:;-]+$", "", s[:n - 1]) + "…"
+
+
+def _when(d: datetime, t: Optional[str], n: int) -> str:
+    day = "bugün" if n == 0 else ("yarın" if n == 1 else f"{d.day} {AY_KISA[d.month - 1]} {GUN_KISA[d.weekday()]}")
+    return f"{day} {t}" if t else day
+
+
+def ann_facts(events: List[Dict[str, Any]], limit: int = 3) -> List[str]:
+    """Bir duyurunun metnindeki kritik bilgi: bugün ya da ileride olan tarihli olaylar ('Ara sınav bugün 14:00').
+    Geçmiş tarihler yazılmaz. Türü belli olmayan tarihte cümlenin kendisi verilir."""
+    out: List[str] = []
+    rows = []
+    for e in events or []:
+        try:
+            d, t = _display_dt(e)
+        except (KeyError, ValueError, TypeError):
+            continue
+        n = _days(d)
+        if n >= 0:
+            rows.append((d, t, n, e))
+    for d, t, n, e in sorted(rows, key=lambda r: (r[0], r[1] or "99")):
+        typ = e.get("type") or "other"
+        fact = f"{TYPE_LABEL[typ]} {_when(d, t, n)}" if typ in TYPE_LABEL else _cut(e.get("title") or "", 90)
+        if fact and fact not in out:
+            out.append(fact)
+    return out[:limit]
+
+
+def is_stale(it: Dict[str, Any], now_ts: int) -> bool:
+    """Eski tarihli ve artık işe yaramayan haber: bir haftadan eski bir duyuru/ileti, içinde bugün ya da
+    ileriye dönük bir tarih yok ve metninde gösterilebilir bir değişiklik de yok (Moodle sadece 'değişti'
+    demiş). Kayıt silinmez, sadece özete girmez. Notlar ve dosyalar bu kuralın dışındadır."""
+    if it.get("kind") not in TEXT_KINDS:
+        return False
+    t = it.get("time")
+    if not t or t > now_ts - STALE_DAYS * 86400:
+        return False
+    if it.get("updated") and it.get("change"):
+        return False
+    return not ann_facts(it.get("events") or [], 1)
+
+
+def gist(text: str, limit: int = 90) -> str:
+    """Tarihli bir bilgi çıkmayan duyuru için tek kısa cümle (selam satırı atlanır)."""
+    body = text.split("\n\n", 1)[1] if text.startswith("Gönderen:") and "\n\n" in text else text
+    body = RE_HELLO.sub("", body).strip()
+    first = re.split(r"(?<=[.!?])\s+|\n", body, maxsplit=1)[0] if body else ""
+    return _cut(re.sub(r"\s+", " ", first), limit)
+
+
+FILLER = set("the a an has have had been is are was were be to on in at for of and or it this that now please you your can "
+             "find see check uploaded posted announced available shared published added attached moodle page course "
+             "yüklendi yüklenmiştir paylaşıldı paylaşılmıştır duyuruldu eklendi eklenmiştir sisteme sayfasına bulabilirsiniz "
+             "ve ile için bir".split())
+
+
+def adds_to_title(sentence: str, title: str) -> bool:
+    """Cümle, başlığın söylediğinden fazlasını söylüyor mu? 'Seating Plan for MT2 has been uploaded to Moodle'
+    başlığın tekrarıdır; 'Office hours moved to TB215' değildir."""
+    words = lambda t: [w for w in re.sub(r"[^\w ]+", " ", (t or "").replace("İ", "i").lower()).split()]
+    have = set(words(title)) | FILLER
+    return any(w not in have for w in words(sentence))
+
+
+def filter_other(other: List[Dict[str, Any]], shown: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """'Yeni içerik' listesinden tekrarları çıkarır: takvim kaydı zaten Bugün/Bu hafta'da görünüyorsa ve
+    Moodle bildirimi zaten gösterilen bir duyurunun/öğenin haberiyse yazılmaz."""
+    titles = [html.unescape(x.get("title") or "").strip().lower() for x in shown if x.get("kind") != "bildirim"]
+    titles = [t for t in titles if len(t) >= 4]
+    ann_titles = {(x["course"], html.unescape(x.get("title") or "").strip().lower()) for x in shown if x.get("kind") in ANN_KINDS}
+    out = []
+    for it in other:
+        if (it["course"], _base_title(it)) in ann_titles:
+            continue  # duyurusu zaten yazılan dosya/etkinlik ("Seating Plan" duyurusu + aynı adlı dosya)
+        if it["kind"] == "takvim":
+            try:
+                n = _days(datetime.strptime((it.get("text") or "")[:10], "%Y-%m-%d"))
+            except ValueError:
+                n = None
+            if n is not None and n <= 7:
+                continue  # geçmiş, ya da zaten Bugün / Bu hafta'da
+        if it["kind"] == "bildirim":
+            low = html.unescape(it.get("title") or "").lower()
+            if any(t in low for t in titles):
+                continue
+        out.append(it)
+    return out
+
+
+def group_other(items: List[Dict[str, Any]], max_lines: int = 6) -> List[str]:
+    """Yeni dosya/etkinlik gibi öğeleri ders başına tek satıra indirir: 'IE306 5 dosya (L7, L8, L9, +2) · quiz: Quiz 3'."""
+    bases: Dict[Any, int] = {}
+    for it in items:
+        k = (it["course"], _base_title(it))
+        bases[k] = bases.get(k, 0) + 1
+    by: Dict[str, Dict[str, List[str]]] = {}
+    for it in items:
+        title = short_title(it, 40)
+        if " / " in (it.get("title") or "") and bases[(it["course"], _base_title(it))] > 1:
+            title = _cut(it["title"].split(" / ", 1)[1], 40)  # aynı klasörden birkaç dosya: dosya adı ayırt eder
+        elif " / " in title:
+            title = _cut(title.split(" / ")[0], 40)
+        if it["kind"] == "takvim":
+            try:
+                d = datetime.strptime((it.get("text") or "")[:10], "%Y-%m-%d")
+                title += f" ({d.day} {AY_KISA[d.month - 1]})"
+            except ValueError:
+                pass
+        if it.get("updated"):
+            title += f" (✏️ {_cut(it['change'], 60)})" if it.get("change") else " ✏️"
+        by.setdefault(it["course"], {}).setdefault(kind_tr(it["kind"]), []).append(title)
+    lines = []
+    for course, labs in by.items():
+        parts = []
+        for lab, ts in labs.items():
+            if lab.lower() == course.lower():
+                parts.append(", ".join(ts[:3]) + (f", +{len(ts) - 3}" if len(ts) > 3 else ""))  # "Bildirim bildirim:" demeyelim
+            else:
+                parts.append(f"{lab}: {', '.join(ts)}" if len(ts) <= 3 else f"{len(ts)} {lab} ({', '.join(ts[:3])}, +{len(ts) - 3})")
+        lines.append(f"• <b>{E(course)}</b> {E(' · '.join(parts))}")
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [f"… ve {len(lines) - max_lines} ders daha"]
+    return lines
+
+
 def free_brief(ctx: Dict[str, Any], new_items: List[Dict[str, Any]]) -> str:
+    """Moodle akışının özeti. Boş bölüm yazılmaz; duyuruların metni değil içindeki kritik bilgi yazılır."""
     today = datetime.now(TZ)
+    now_ts = int(today.timestamp())
     evs = merged_events(ctx)
     L = [f"☀️ <b>{today.day} {AY_KISA[today.month - 1]} {GUN[today.weekday()]}</b>"]
 
-    todays = [e for e in evs if e["_n"] == 0]
-    L.append("\n📌 <b>BUGÜN</b>")
-    L += [f"• <b>{E(e['course'])}</b> {E(_label(e).rstrip(' ❔'))}"
-          f"{' ❔' if e.get('certainty') == 'approximate' else ''}{' — ' + e['_t'] if e.get('_t') else ''}"
-          for e in todays] or ["Kayıtlı bir şey yok"]
-
-    exams = [e for e in evs if is_exam(e)][:3]
-    L.append("\n🎯 <b>SINAVLAR</b>")
-    L += [_line(e, True) for e in exams] or ["Kayıtlı sınav yok — syllabus'lara bir göz at"]
-
-    week = [e for e in evs if 1 <= e["_n"] <= 7 and e not in exams]
-    L.append("\n📅 <b>BU HAFTA</b>")
-    if not week:
-        L.append("Teslim yok")
-    cur = None
-    for e in week:
-        d = e["_d"]
-        head = f"{GUN[d.weekday()]} {d.day} {AY_KISA[d.month - 1]} ({_left(e['_n'])})"
-        if head != cur:
-            L.append(f"<i>{E(head)}</i>")
-            cur = head
-        t = f" — {e['_t']}" if e.get("_t") else ""
+    def row(e: Dict[str, Any], when: str) -> str:
         mark = " ❔" if e.get("certainty") == "approximate" else ""
         warn = " ⚠️" if e.get("changed_from") or e.get("weekday_mismatch") else ""
-        L.append(f"  • <b>{E(e['course'])}</b> {E(_label(e).rstrip(' ❔'))}{mark}{t}{warn}")
+        return f"• {when + ' ' if when else ''}<b>{E(e['course'])}</b> {E(_label(e).rstrip(' ❔'))}{mark}{warn}"
 
-    # aynı duyuru birden fazla şubeye atılmışsa bir kez göster
+    todays = [e for e in evs if e["_n"] == 0]
+    if todays:
+        L.append("\n📌 <b>BUGÜN</b>")
+        L += [row(e, e.get("_t") or "") for e in todays]
+
+    exams = [e for e in evs if is_exam(e)][:3]
+    if exams:
+        L.append("\n🎯 <b>SINAVLAR</b>")
+        L += [_line(e, True) for e in exams]
+
+    week = [e for e in evs if 1 <= e["_n"] <= 7 and e not in exams]
+    if week:
+        L.append("\n📅 <b>BU HAFTA</b>")
+        L += [row(e, _when(e["_d"], e.get("_t"), e["_n"])) for e in week]
+
+    # aynı duyuru birden fazla şubeye atılmışsa bir kez göster; eskimiş haberleri özete alma
     seen_news, uniq_items = set(), []
     for it in new_items:
+        if is_stale(it, now_ts):
+            continue
         k = (it["course"], (it.get("title") or "").strip().lower(), h(it.get("text") or "")[:8] if it["kind"] != "dosya" else it["key"])
         if k in seen_news:
             continue
         seen_news.add(k)
         uniq_items.append(it)
     uniq_items = dedupe_news(uniq_items)
-    ann_kinds = ("duyuru", "mesaj", "duyuru cevabı")
-    ann = [it for it in uniq_items if it["kind"] in ann_kinds]
+    ann = [it for it in uniq_items if it["kind"] in ANN_KINDS]
     grades = [it for it in uniq_items if it["kind"] == "not"]
-    other = [it for it in uniq_items if it not in ann and it not in grades]
+    other = filter_other([it for it in uniq_items if it not in ann and it not in grades], uniq_items)
     if grades:
-        L.append(f"\n📊 <b>YENİ NOTLAR ({len(grades)})</b>")
+        L.append("\n📊 <b>NOTLAR</b>")
         for it in grades[:15]:
             lines = (it.get("text") or "").split("\n")
             fb = re.sub(r"\s+", " ", " ".join(lines[1:])).strip()
             upd = " (değişti)" if it.get("updated") else ""
             L.append(f"• <b>{E(it['course'])}</b> {E(it['title'][:60])}: <b>{E(lines[0])}</b>{upd}"
-                     + (f"\n   <i>{E(fb[:140])}</i>" if fb else ""))
+                     + (f" — <i>{E(_cut(fb, 100))}</i>" if fb else ""))
     if ann:
-        L.append(f"\n📣 <b>YENİ DUYURULAR ({len(ann)})</b>")
-        for it in ann:
-            raw = it.get("text") or ""
-            body = raw.split("\n\n", 1)[1] if raw.startswith("Gönderen:") and "\n\n" in raw else raw
-            body = re.sub(r"\n{2,}", "\n", body).strip()
-            cut = len(body) > 450
-            body = body if not cut else body[:450].rstrip() + "…"
-            upd = " (güncellendi)" if it.get("updated") else ""
-            chg = f"\n✏️ <i>değişen: {E(it['change'])}</i>" if it.get("updated") and it.get("change") else ""
-            more = f"\n{_link(it.get('url', ''), 'devamı Moodle’da')}" if cut and it.get("url") else ""
-            L.append(f"\n<b>{E(it['course'])} · {E(it['title'])}</b>{upd}{chg}\n{E(body)}{more}")
-    if other:
-        L.append(f"\n🆕 <b>DİĞER ({len(other)})</b>")
-        for it in other[:25]:
+        L.append("\n📣 <b>DUYURULAR</b>")
+        for it in ann[:12]:
+            title = _link(it.get("url", ""), _cut(it["title"], 70)) or E(_cut(it["title"], 70))
+            facts = ann_facts(it.get("events") or [])
             if it.get("updated") and it.get("change"):
-                tail = f" — <i>{E(it['change'])}</i>"
-                title = short_title(it, 38)
-            else:
-                tail = " (güncellendi)" if it.get("updated") else ""
-                title = short_title(it)
-            L.append(f"• {E(it['course'])} · {E(kind_tr(it['kind']))}: {E(title)}{tail}")
-        if len(other) > 25:
-            L.append(f"… ve {len(other) - 25} öğe daha")
+                facts = [f"✏️ {_cut(it['change'], 90)}"] + facts
+            elif not facts:
+                g = gist(it.get("text") or "")
+                facts = [g] if adds_to_title(g, it.get("title") or "") else []
+            upd = " (güncellendi)" if it.get("updated") else ""
+            L.append(f"• <b>{E(it['course'])}</b> · {title}{upd}" + "".join(f"\n   → {E(f)}" for f in facts))
+        if len(ann) > 12:
+            L.append(f"… ve {len(ann) - 12} duyuru daha")
+    if other:
+        L.append("\n🆕 <b>YENİ İÇERİK</b>")
+        L += group_other(other)
     if ctx.get("removed"):
-        L.append(f"\n🗂 <b>MOODLE'DAN KALDIRILANLAR</b> <i>(arşivde duruyor)</i>")
-        for x in ctx["removed"][:10]:
-            L.append(f"• {E(x['course'] or '')} · {E(kind_tr(x['kind'] or ''))}: {E((x['title'] or '')[:70])}")
-    if not uniq_items:
-        last = ctx.get("last_sent")
-        gap = (today.date() - datetime.strptime(last, "%Y-%m-%d").date()).days if last else 1
-        L.append("\n🆕 Dünden beri yeni bir şey yok" if gap <= 1 else f"\n🆕 Son {gap} günde yeni bir şey yok")
-    if any(e.get("certainty") == "approximate" for e in evs if e["_n"] <= 7 or e in exams):
+        rem = ctx["removed"]
+        names = ", ".join(_cut(f"{x['course'] or ''} {x['title'] or ''}", 40) for x in rem[:3])
+        L.append(f"\n🗂 Moodle'dan kaldırıldı (arşivde duruyor): {E(names)}" + (f", +{len(rem) - 3}" if len(rem) > 3 else ""))
+    if len(L) == 1:
+        L.append("\nBugün için kayıtlı bir şey ve yeni içerik yok.")
+    if any(e.get("certainty") == "approximate" for e in todays + exams + week):
         L.append("\n<i>❔ = duyuru metninden çıkarıldı, teyit et</i>")
     return "\n".join(L)
 
@@ -1758,6 +1884,8 @@ def main() -> None:
     for it in new_items:
         log(f"YENİ: [{it['course']}] {it['kind']}: {it['title']}")
 
+    for it in new_items:  # özet, duyurunun metni yerine içindeki tarihli bilgiyi yazar
+        it["events"] = state["extracted"].get(it["key"], {}).get("events", [])
     ctx = build_context(data, state, new_items)
     ctx["removed"] = [{"course": x.get("course"), "kind": x.get("kind"), "title": x.get("title")} for x in newly_hidden]
     is_html = True
