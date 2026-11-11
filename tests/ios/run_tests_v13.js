@@ -157,6 +157,53 @@ const REVIEW_ANN = "<p>Dear Math101 students,</p><p>You can find your midterm gr
   await A.instantNotify(st, [1, 2, 3, 4, 5].map(i => mkIt(i)))
   check("anlık: aynı öğe ikinci kez bildirilmez", scheduled.length, 0)
 
+  // ---- sürüm kontrolü
+  check("sürüm karşılaştırma", ["1.3.0 vs 1.3.0", "1.3.0 vs 1.4.0", "1.3.0 vs 1.2.9", "1.9.0 vs 1.10.0", "1.3 vs 1.3.1"]
+    .map(c => A.cmpVer(...c.split(" vs "))), [0, -1, 1, -1, -1])
+  // kurulum sayfasındaki sürüm dosyası betikle aynı sürümü söylemeli (yoksa herkese boş yere güncelleme çıkar)
+  const vj = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "docs", "version.json"), "utf8"))
+  check("version.json betikle aynı sürümde", vj.version, A.VERSION)
+
+  let asked = []
+  A.setGet(async (url) => { asked.push(url); return vj })
+  let su = A.loadState()
+  su.settings = { sendTime: "07:30", instantAnnouncements: true, updateCheck: true }
+  scheduled.length = 0
+  check("aynı sürüm: uyarı yok", [await A.checkUpdate(su), scheduled.length, asked.length], [null, 0, 1])
+
+  // yeni sürüm çıktı
+  A.setGet(async (url) => { asked.push(url); return { version: "1.4.0", notes: "  Yeni:\n  quiz  tarihleri " } })
+  delete su.updateCheckedAt
+  check("yeni sürüm: bir kez bildirilir", [(await A.checkUpdate(su)).version, scheduled.map(s => [s.id, s.title, s.body])],
+    ["1.4.0", [["moodlebrief.update", "⬆️ Moodle Brief 1.4.0 çıktı (sende 1.3.0)",
+      "Yeni: quiz tarihleri\nKurulum sayfasını aç, kodu kopyalayıp betiğin üstüne yapıştır."]]])
+  check("istek kurulum sayfasındaki dosyaya gider", asked[asked.length - 1], "https://kodmir.github.io/moodle-daily-brief/version.json")
+
+  const n1 = asked.length
+  scheduled.length = 0
+  check("20 saat dolmadan tekrar bakılmaz", [(await A.checkUpdate(su)).version, asked.length, scheduled.length], ["1.4.0", n1, 0])
+  clock += 21 * 3600 * 1000
+  check("20 saat sonra bakılır ama aynı sürüm tekrar bildirilmez", [(await A.checkUpdate(su)).version, asked.length - n1, scheduled.length],
+    ["1.4.0", 1, 0])
+
+  // sunucuya ulaşılamıyor / bozuk cevap: sessiz, çöküş yok, bilinen son durum korunur
+  clock += 21 * 3600 * 1000
+  A.setGet(async () => { throw new Error("offline") })
+  check("ulaşılamazsa sessiz", (await A.checkUpdate(su)).version, "1.4.0")
+  for (const bad of [null, {}, { version: 42 }, { version: "sürüm yok" }, { version: "1.2.0" }]) {
+    clock += 21 * 3600 * 1000
+    A.setGet(async () => bad)
+    scheduled.length = 0
+    check("bozuk/eski sürüm bilgisi: " + JSON.stringify(bad), [await A.checkUpdate(su), scheduled.length], [null, 0])
+  }
+
+  // ayardan kapatılınca hiç istek atılmaz
+  clock += 21 * 3600 * 1000
+  su.settings.updateCheck = false
+  const n2 = asked.length
+  A.setGet(async (url) => { asked.push(url); return { version: "9.9.9" } })
+  check("kapalıyken ağa çıkılmaz", [await A.checkUpdate(su), asked.length - n2, scheduled.length], [null, 0, 0])
+
   console.log(`\n${pass} geçti, ${fail} başarısız`)
   process.exit(fail ? 1 : 0)
 })().catch(e => { console.error("ÇALIŞMA HATASI:", e); process.exit(1) })

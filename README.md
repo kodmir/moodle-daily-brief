@@ -147,6 +147,7 @@ syllabus PDF), and the brief is written by Claude. Without a key the tool is ful
 ```
 moodle_brief.py        collection, diffing, date extraction, rendering, Telegram, state
 docs/                  install page (GitHub Pages) + the iPhone/Scriptable port
+docs/version.json      Latest published version; the script checks it once a day (a test keeps it in sync)
 tests/ios/             Node tests for the iPhone port (fake Moodle, fake Scriptable APIs)
 demo.py                offline demo with a fake Moodle
 tests/                 pytest suite (frozen clock, fake Moodle and Telegram)

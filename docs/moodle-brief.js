@@ -4,7 +4,9 @@
 // Her sabah Moodle'daki bugünkü teslimleri, haftanın olaylarını, en yakın sınavı ve yeni
 // duyuruları bildirim olarak gönderir. Ana ekran widget'ı en yakın sınavları gösterir.
 //
-// GİZLİLİK: Her şey SADECE bu telefonda çalışır. Giriş Moodle'ın kendi sayfasında (Busign)
+// GİZLİLİK: Her şey SADECE bu telefonda çalışır. Betiğin Moodle dışında tek bağlantısı, günde bir kez
+// kurulum sayfasındaki sürüm dosyasını okumasıdır (yeni sürüm uyarısı). O istekte hiçbir veri gönderilmez
+// ve Ayarlar'dan kapatılabilir. Giriş Moodle'ın kendi sayfasında (Busign)
 // yapılır; betik şifreni görmez. Moodle'ın verdiği anahtar bu telefonun şifreli Keychain'inde,
 // kayıtlar bu telefonun hafızasında durur. Hiçbir veri başka bir sunucuya gönderilmez.
 // Kayıtlar asla silinmez; eskiyen ya da Moodle'dan kalkan öğeler sadece gösterilmez.
@@ -17,6 +19,9 @@ const KC_TOKEN = "moodlebrief.token"
 const KC_URL = "moodlebrief.url"
 const NOTIF_MORNING = "moodlebrief.morning"
 const NOTIF_DUE = "moodlebrief.due."
+const NOTIF_UPDATE = "moodlebrief.update"
+const INSTALL_URL = "https://kodmir.github.io/moodle-daily-brief/"
+const UPDATE_URL = INSTALL_URL + "version.json"
 const LOOKAHEAD_DAYS = 45
 
 // ============================================================ zaman yardımcıları
@@ -96,6 +101,12 @@ let httpPost = async (url, body, contentType) => {        // testlerde değişti
   r.headers = { "Content-Type": contentType }
   r.body = body
   r.timeoutInterval = 30
+  return await r.loadJSON()
+}
+
+let httpGet = async (url) => {                            // testlerde değiştirilir
+  const r = new Request(url)
+  r.timeoutInterval = 10
   return await r.loadJSON()
 }
 
@@ -637,7 +648,7 @@ const dir = () => { const d = fm.joinPath(fm.documentsDirectory(), "moodle-brief
 const statePath = () => fm.joinPath(dir(), "state.json")
 function loadState() {
   const empty = { seen: {}, extracted: {}, firstSeen: {}, missingSince: {}, archived: {}, replyCache: {}, lastFetch: 0,
-    lastStruct: [], settings: { sendTime: "07:30", instantAnnouncements: true }, notifiedInstant: {} }
+    lastStruct: [], settings: { sendTime: "07:30", instantAnnouncements: true, updateCheck: true }, notifiedInstant: {} }
   for (const p of [statePath(), statePath() + ".bak"]) {
     try { if (fm.fileExists(p)) return Object.assign(empty, JSON.parse(fm.readString(p))) } catch (e) {}
   }
@@ -873,6 +884,7 @@ function briefHtml(m) {
 @media(prefers-color-scheme:dark){body{background:#000;color:#eee}.ann{background:#1c1c1e!important}.d,.foot{color:#999!important}}
 h1{font-size:26px;margin:4px 0 2px}h2{font-size:17px;margin:22px 0 6px}ul{padding-left:18px;margin:4px 0}li{margin:4px 0}
 .d{color:#666}.w{color:#d97706;font-size:14px}.day{font-weight:600;margin-top:8px}.ann{background:#f2f2f7;border-radius:12px;padding:10px 12px;margin:8px 0}
+.upd{background:#0a84ff;color:#fff;border-radius:10px;padding:8px 12px;margin-bottom:10px;font-size:15px}.upd a{color:#fff;font-weight:600}
 .ok{color:#1a7f45;font-size:14px}.q{color:#777;font-size:14px;font-style:italic}.src{font-size:14px;white-space:nowrap}
 .ann p{margin:6px 0;white-space:pre-wrap}.empty{color:#888}.foot{color:#888;font-size:13px;margin-top:24px}a{color:#0a84ff}
 </style></head><body>
@@ -992,6 +1004,42 @@ async function instantNotify(st, fresh) {
     await n.schedule()
     rest.forEach(it => { sent[it.key] = it.version })
   }
+}
+
+// ============================================================ sürüm kontrolü
+// "1.10.0" > "1.9.3": parça parça sayısal karşılaştırma
+function cmpVer(a, b) {
+  const pa = String(a).split("."), pb = String(b).split(".")
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = parseInt(pa[i], 10) || 0, y = parseInt(pb[i], 10) || 0
+    if (x !== y) return x < y ? -1 : 1
+  }
+  return 0
+}
+// Günde bir kez kurulum sayfasındaki sürüm dosyasına bakar; yenisi varsa bir kez bildirir.
+// Giden tek şey isteğin kendisidir: ders/kullanıcı verisi gönderilmez, karşı taraf GitHub'ın statik
+// sunucusudur. Ulaşılamazsa sessizce geçer; brifing her hâlükârda çalışır.
+async function checkUpdate(st) {
+  if (st.settings.updateCheck === false) return null
+  const nowMs = now().getTime()
+  if (st.updateCheckedAt && nowMs - st.updateCheckedAt < 20 * 3600 * 1000) return st.updateReady || null
+  st.updateCheckedAt = nowMs
+  let info
+  try { info = await httpGet(UPDATE_URL) } catch (e) { return st.updateReady || null }
+  const v = info && typeof info.version === "string" ? info.version.trim() : ""
+  if (!/^\d+(?:\.\d+){0,3}$/.test(v) || cmpVer(VERSION, v) >= 0) { delete st.updateReady; return null }
+  st.updateReady = { version: v, notes: String((info && info.notes) || "").replace(/\s+/g, " ").trim().slice(0, 200) }
+  if (st.updateNotified !== v) {
+    st.updateNotified = v
+    const n = new Notification()
+    n.identifier = NOTIF_UPDATE
+    n.threadIdentifier = "moodlebrief"
+    n.title = `⬆️ Moodle Brief ${v} çıktı (sende ${VERSION})`
+    n.body = (st.updateReady.notes ? st.updateReady.notes + "\n" : "") + "Kurulum sayfasını aç, kodu kopyalayıp betiğin üstüne yapıştır."
+    n.openURL = INSTALL_URL
+    await n.schedule()
+  }
+  return st.updateReady
 }
 
 // ============================================================ giriş (Busign / okul hesabı)
@@ -1133,6 +1181,8 @@ async function main() {
   }
 
   await instantNotify(st, fresh)
+  let upd = null
+  try { upd = await checkUpdate(st) } catch (e) {}
   // Kestirmeler otomasyonundan sabah saatinde çalıştıysa: brifingi hemen gönder
   const [hh, mm] = st.settings.sendTime.split(":").map(Number)
   const sendToday = new Date(now().getFullYear(), now().getMonth(), now().getDate(), hh, mm)
@@ -1159,6 +1209,8 @@ async function main() {
     return true
   }
   let html = briefHtml(model)
+  if (upd) html = html.replace("<h1>", `<div class=upd>⬆️ Yeni sürüm ${esc(upd.version)} var — <a href="${INSTALL_URL}">kurulum sayfasını aç</a>` +
+    `${upd.notes ? `<div style="font-size:13px;opacity:.9">${esc(upd.notes)}</div>` : ""}</div><h1>`)
   if (error) html = html.replace("<h1>", `<div class=w style="margin-bottom:8px">⚠️ ${esc(error)}</div><h1>`)
   html = html.replace("</body>", `<p class=foot><a href="moodlebrief://settings">⚙️ Ayarlar</a> · sonraki sabah bildirimi: ${st.nextMorning ? esc(trDate(new Date(st.nextMorning)) + " " + hm(new Date(st.nextMorning))) : "-"}</p></body>`)
   await wv.loadHTML(html)
@@ -1168,12 +1220,14 @@ async function main() {
 const DONE_SETTINGS = `<html><head><meta name=viewport content="width=device-width,initial-scale=1"><style>body{font-family:-apple-system;display:flex;align-items:center;justify-content:center;height:90vh;text-align:center}</style></head><body><p>Ayarlar için sol üstteki <b>Close</b>'a bas.</p></body></html>`
 
 async function settings(st, base) {
-  const remOn = st.settings.deadlineReminders !== false
+  const remOn = st.settings.deadlineReminders !== false, updOn = st.settings.updateCheck !== false
   const c = await alert("Ayarlar", `Sabah bildirimi: ${st.settings.sendTime}\nAnlık duyuru bildirimi: ${st.settings.instantAnnouncements ? "açık" : "kapalı"}` +
-    `\nTeslim hatırlatması (3 saat kala): ${remOn ? "açık" : "kapalı"}`,
+    `\nTeslim hatırlatması (3 saat kala): ${remOn ? "açık" : "kapalı"}` +
+    `\nYeni sürüm uyarısı: ${updOn ? "açık" : "kapalı"}\n\nSürüm ${VERSION}`,
     ["Bildirim saatini değiştir", st.settings.instantAnnouncements ? "Anlık duyuruları kapat" : "Anlık duyuruları aç",
       "Sabah bildirimini tam saatinde almak (Kestirmeler)", "Moodle bağlantısını yenile",
-      remOn ? "Teslim hatırlatmalarını kapat" : "Teslim hatırlatmalarını aç"], "Kapat")
+      remOn ? "Teslim hatırlatmalarını kapat" : "Teslim hatırlatmalarını aç",
+      updOn ? "Yeni sürüm uyarısını kapat" : "Yeni sürüm uyarısını aç"], "Kapat")
   if (c === 0) {
     const a = new Alert()
     a.title = "Bildirim saati"
@@ -1199,6 +1253,14 @@ async function settings(st, base) {
   } else if (c === 4) {
     st.settings.deadlineReminders = !remOn
     try { await scheduleReminders(st, buildModel(st, now()).all) } catch (e) {}
+  } else if (c === 5) {
+    st.settings.updateCheck = !updOn
+    if (st.settings.updateCheck) {
+      delete st.updateCheckedAt                                 // açınca hemen bir kez bak
+      try { await checkUpdate(st) } catch (e) {}
+    } else {
+      Notification.removePending([NOTIF_UPDATE])
+    }
   }
   saveState(st)
 }
@@ -1206,8 +1268,8 @@ async function settings(st, base) {
 // Testler bu dosyayı __TEST__ ile yükler ve iç fonksiyonları alır
 if (typeof __TEST__ !== "undefined") {
   __EXPORTS__.api = { regexDates, freeExtract, supersede, mergedEvents, buildModel, ingest, notificationText, briefHtml,
-    shortCourse, examSlot, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setFm: f => { fm = f },
-    loadState, saveState, nextSendDate, reminderTime, scheduleReminders, instantNotify, remKind, stripHello, widget, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr, gradesFromTable }
+    shortCourse, examSlot, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setGet: f => { httpGet = f }, setFm: f => { fm = f },
+    loadState, saveState, nextSendDate, reminderTime, scheduleReminders, instantNotify, remKind, stripHello, checkUpdate, cmpVer, settings, VERSION, widget, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr, gradesFromTable }
 } else {
   await main()
   Script.complete()
