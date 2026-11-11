@@ -172,25 +172,26 @@ const REVIEW_ANN = "<p>Dear Math101 students,</p><p>You can find your midterm gr
   check("aynı sürüm: uyarı yok", [await A.checkUpdate(su), scheduled.length, asked.length], [null, 0, 1])
 
   // yeni sürüm çıktı
-  A.setGet(async (url) => { asked.push(url); return { version: "1.4.0", notes: "  Yeni:\n  quiz  tarihleri " } })
+  const NEWER = "99.0.0"                                   // betiğin kendi sürümü ne olursa olsun daha yeni
+  A.setGet(async (url) => { asked.push(url); return { version: NEWER, notes: "  Yeni:\n  quiz  tarihleri " } })
   delete su.updateCheckedAt
   check("yeni sürüm: bir kez bildirilir", [(await A.checkUpdate(su)).version, scheduled.map(s => [s.id, s.title, s.body])],
-    ["1.4.0", [["moodlebrief.update", "⬆️ Moodle Brief 1.4.0 çıktı (sende 1.3.0)",
+    [NEWER, [["moodlebrief.update", `⬆️ Moodle Brief ${NEWER} çıktı (sende ${A.VERSION})`,
       "Yeni: quiz tarihleri\nKurulum sayfasını aç, kodu kopyalayıp betiğin üstüne yapıştır."]]])
   check("istek kurulum sayfasındaki dosyaya gider", asked[asked.length - 1], "https://kodmir.github.io/moodle-daily-brief/version.json")
 
   const n1 = asked.length
   scheduled.length = 0
-  check("20 saat dolmadan tekrar bakılmaz", [(await A.checkUpdate(su)).version, asked.length, scheduled.length], ["1.4.0", n1, 0])
+  check("20 saat dolmadan tekrar bakılmaz", [(await A.checkUpdate(su)).version, asked.length, scheduled.length], [NEWER, n1, 0])
   clock += 21 * 3600 * 1000
   check("20 saat sonra bakılır ama aynı sürüm tekrar bildirilmez", [(await A.checkUpdate(su)).version, asked.length - n1, scheduled.length],
-    ["1.4.0", 1, 0])
+    [NEWER, 1, 0])
 
   // sunucuya ulaşılamıyor / bozuk cevap: sessiz, çöküş yok, bilinen son durum korunur
   clock += 21 * 3600 * 1000
   A.setGet(async () => { throw new Error("offline") })
-  check("ulaşılamazsa sessiz", (await A.checkUpdate(su)).version, "1.4.0")
-  for (const bad of [null, {}, { version: 42 }, { version: "sürüm yok" }, { version: "1.2.0" }]) {
+  check("ulaşılamazsa sessiz", (await A.checkUpdate(su)).version, NEWER)
+  for (const bad of [null, {}, { version: 42 }, { version: "sürüm yok" }, { version: "0.9.0" }]) {
     clock += 21 * 3600 * 1000
     A.setGet(async () => bad)
     scheduled.length = 0

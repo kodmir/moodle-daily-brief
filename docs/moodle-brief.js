@@ -12,7 +12,7 @@
 // Kayıtlar asla silinmez; eskiyen ya da Moodle'dan kalkan öğeler sadece gösterilmez.
 // ------------------------------------------------------------------------------------------
 
-const VERSION = "1.3.0"
+const VERSION = "1.4.0"
 const RULES = "2"                        // tarih çıkarma kuralları değişince artar: kayıtlı duyurular yeniden taranır
 const DEFAULT_URL = "https://moodle.bogazici.edu.tr"
 const KC_TOKEN = "moodlebrief.token"

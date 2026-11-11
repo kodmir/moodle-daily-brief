@@ -1,5 +1,5 @@
 {
-  "version": "1.3.0",
-  "notes": "Sınav sonrası inceleme/itiraz oturumları artık sınav sayılmıyor; hatırlatma ve sabah bildirimi metinleri netleşti.",
+  "version": "1.4.0",
+  "notes": "Yeni sürüm uyarısı eklendi: bundan sonra düzeltmelerden haberin olacak.",
   "url": "https://kodmir.github.io/moodle-daily-brief/"
 }
