@@ -12,8 +12,8 @@
 // Kayıtlar asla silinmez; eskiyen ya da Moodle'dan kalkan öğeler sadece gösterilmez.
 // ------------------------------------------------------------------------------------------
 
-const VERSION = "1.5.0"
-const RULES = "2"                        // tarih çıkarma kuralları değişince artar: kayıtlı duyurular yeniden taranır
+const VERSION = "1.6.0"
+const RULES = "3"                        // tarih çıkarma kuralları değişince artar: kayıtlı duyurular yeniden taranır
 const DEFAULT_URL = "https://moodle.bogazici.edu.tr"
 const KC_TOKEN = "moodlebrief.token"
 const KC_URL = "moodlebrief.url"
@@ -23,6 +23,11 @@ const NOTIF_UPDATE = "moodlebrief.update"
 const INSTALL_URL = "https://kodmir.github.io/moodle-daily-brief/"
 const UPDATE_URL = INSTALL_URL + "version.json"
 const LOOKAHEAD_DAYS = 45
+const FORUM_PAGE = 40                    // bir istekte gelen tartışma sayısı
+const FORUM_PAGES = 5                    // forum başına en çok bu kadar sayfa okunur
+// Etkinlik tarihinin etiketi Moodle'ın arayüz diline göre değişir ("Due:" / "Son teslim:"); 'dataid' değişmez
+const DATE_IDS = { duedate: "teslim", timeclose: "kapanış", timeopen: "açılış", allowsubmissionsfromdate: "açılış",
+  cutoffdate: "kesme tarihi", gradingduedate: "remind me to grade by" }
 
 // ============================================================ zaman yardımcıları
 let nowFn = () => new Date()             // testlerde dondurulur
@@ -38,6 +43,7 @@ const dayStart = d => new Date(d.getFullYear(), d.getMonth(), d.getDate())
 const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n, d.getHours(), d.getMinutes())
 const daysBetween = (fromDate, ymdStr) => Math.round((fromYmd(ymdStr) - dayStart(fromDate)) / 86400000)
 const trDate = d => `${d.getDate()} ${AY_KISA[d.getMonth()]} ${GUN_KISA[d.getDay()]}`
+const dayMon = d => `${d.getDate()} ${AY_KISA[d.getMonth()]}`
 const fmtTs = ts => { const d = new Date(ts * 1000); return `${ymd(d)} ${hm(d)} ${GUN[d.getDay()]}` }
 const left = n => n === 0 ? "bugün" : n === 1 ? "yarın" : `${n} gün`
 
@@ -197,6 +203,7 @@ async function collect(base, token, replyCache) {
   courses.forEach(c => { cname[c.id] = shortCourse(c.shortname || c.fullname || String(c.id)) })
   const cids = courses.map(c => c.id)
   const items = [], struct = [], newCache = {}
+  let capped = false
 
   // 1) ders içerikleri
   for (const c of courses) {
@@ -217,6 +224,7 @@ async function collect(base, token, replyCache) {
           if (!d.timestamp || d.timestamp <= nowTs - 86400) continue
           let lab = String(d.label || "").replace(/[\s:]+$/, "").trim().toLowerCase()
           lab = { due: "teslim", closes: "kapanış", opens: "açılış", closed: "kapanış", opened: "açılış" }[lab] || lab
+          lab = DATE_IDS[String(d.dataid || "").toLowerCase()] || lab
           if (lab === "açılış" && mod.modname !== "quiz") continue
           if (["cut-off date", "remind me to grade by", "kesme tarihi"].includes(lab)) continue
           const title = lab && lab !== "teslim" ? `${unescapeHtml(mod.name)} (${lab})` : unescapeHtml(mod.name)
@@ -238,11 +246,23 @@ async function collect(base, token, replyCache) {
   for (const fo of forums) {
     const cn = cname[fo.course] || "?"
     const kind = fo.type === "news" ? "duyuru" : "forum"
-    let res = await tryCall(base, token, "mod_forum_get_forum_discussions", { forumid: fo.id, page: 0, perpage: 40 }, null)
-    if (!res) res = await tryCall(base, token, "mod_forum_get_forum_discussions_paginated",
-      { forumid: fo.id, sortby: "timemodified", sortdirection: "DESC", page: 0, perpage: 40 }, {})
-    for (const d of arr(res && res.discussions)) {
+    // Forumun tamamı okunur (40'ar 40'ar): yoksa en yeni 40'ın dışında kalan eski bir duyuru "Moodle'dan kalkmış"
+    // sanılıp içindeki sınav tarihiyle birlikte gizlenirdi.
+    const discs = [], doneIds = new Set()
+    let full = true
+    for (let page = 0; page < FORUM_PAGES; page++) {
+      let res = await tryCall(base, token, "mod_forum_get_forum_discussions", { forumid: fo.id, page, perpage: FORUM_PAGE }, null)
+      if (!res) res = await tryCall(base, token, "mod_forum_get_forum_discussions_paginated",
+        { forumid: fo.id, sortby: "timemodified", sortdirection: "DESC", page, perpage: FORUM_PAGE }, {})
+      const batch = arr(res && res.discussions)
+      discs.push(...batch)
+      if (batch.length < FORUM_PAGE) { full = false; break }
+    }
+    if (full) capped = true             // forum bitmedi: görünmeyen eski tartışmalar "kaldırıldı" sayılmaz
+    for (const d of discs) {
       const did = d.discussion || d.id
+      if (doneIds.has(did)) continue    // sayfalar arasında kayan (sabitlenmiş) tartışma
+      doneIds.add(did)
       const tm = d.modified || d.timemodified || d.created
       const subj = String(d.subject || d.name || "(konu yok)").trim()
       const body = htmlToText(d.message)
@@ -359,7 +379,8 @@ async function collect(base, token, replyCache) {
   items.forEach(it => { uniq[it.key] = it })
   const sd = {}
   struct.forEach(e => { sd[hash(e.course, e.title, e.date, e.time)] = e })
-  return { user: info.fullname, items: Object.values(uniq), struct: Object.values(sd), replyCache: newCache, courses }
+  return { user: info.fullname, items: Object.values(uniq), struct: Object.values(sd), replyCache: newCache, courses,
+    noHide: capped ? ["disc:", "reply:", "att:"] : [] }
 }
 
 // ============================================================ metinden tarih çıkarma
@@ -370,10 +391,10 @@ const EN_AY = { january: 1, february: 2, march: 3, april: 4, may: 5, june: 6, ju
 const EN_KISA = { jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 }
 const KEYWORDS = [
   ["midterm", "midterm|mid-term|ara ?s[ıi]nav|vize"],
-  ["final", "\\bfinal"],
+  ["final", "\\bfinal(?!ly|i[sz]|ist)"],                 // "finally", "finalize" değil
   ["quiz", "quiz"],
-  ["exam", "exam|s[ıi]nav"],
-  ["assignment", "[öo]dev|homework|\\bhw ?\\d|assignment|\\bdue\\b|teslim|deadline|submission"],
+  ["exam", "exam(?!pl|in(?:e|ing))|s[ıi]nav"],           // "example", "examine" değil
+  ["assignment", "[öo]dev|homework|\\bhw ?\\d|assignment|\\bdue\\b(?!\\s+to\\b)|teslim|deadline|submission"],   // "due to" değil
   ["project", "proje|project"],
   ["presentation", "sunum|presentation"],
   ["lab", "\\blab"],
@@ -382,7 +403,7 @@ const KEYWORDS = [
 ]
 const TYPE_LABEL = { midterm: "Ara sınav", final: "Final", quiz: "Quiz", exam: "Sınav", assignment: "Ödev",
   project: "Proje", presentation: "Sunum", lab: "Lab", class_change: "Ders değişikliği", review: "İtiraz/inceleme" }
-const EXAM_RE = /midterm|mid-term|vize|s[ıiIİ]nav|\bfinal|quiz|exam/i
+const EXAM_RE = /midterm|mid-term|vize|s[ıiIİ]nav|\bfinal(?!ly|i[sz]|ist)|quiz|exam(?!pl|in(?:e|ing))/i
 const WEEKDAYS = { monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 0,
   pazartesi: 1, salı: 2, sali: 2, çarşamba: 3, carsamba: 3, perşembe: 4, persembe: 4, cuma: 5, cumartesi: 6, pazar: 0 }
 const WD_ALT = Object.keys(WEEKDAYS).sort((a, b) => b.length - a.length).join("|")
@@ -489,17 +510,20 @@ function regexDates(text, posted = null, title = "") {
   const found = {}, cands = [], taken = []
   for (const m of text.matchAll(RE_DAY_MON)) {
     const mon = monthOf(m[2])
+    if (m[2] === "may" && !m[3]) continue        // "Quiz 2 may be postponed": küçük harfli 'may' fiildir, Mayıs değil
     if (mon) cands.push([m.index, m.index + m[0].length, +m[1], mon, m[3], true, false])
   }
   for (const m of text.matchAll(RE_MON_DAY)) {
     const mon = monthOf(m[1])
     const w = m[1].toLowerCase()
+    if (m[1] === "may" && !m[3]) continue
     if (mon && (w in EN_AY || w in EN_KISA)) cands.push([m.index, m.index + m[0].length, +m[2], mon, m[3], true, false])
   }
   for (const m of text.matchAll(RE_NUM)) {
     if (!m[3] && m[2].length !== 2) continue
     const before = text.slice(Math.max(0, m.index - 12), m.index).toLowerCase()
     if (/(section|chapter|sec\.|bölüm|ch\.|•|-|v|version|sürüm)\s*$/.test(before)) continue
+    if (!m[3] && /(?:\bat|\bsaat|@)\s*$/.test(before)) continue     // "at 9.10", "saat 14.05": saat, tarih değil
     cands.push([m.index, m.index + m[0].length, +m[1], +m[2], m[3], Boolean(m[3]), true])
   }
   const today = dayStart(now())
@@ -598,12 +622,18 @@ function supersede(evs) {
     if (!slot) out.push(e)
     else (groups[e.course + "|" + slot] = groups[e.course + "|" + slot] || []).push(e)
   }
-  for (const g of Object.values(groups)) {
+  for (const [gk, g] of Object.entries(groups)) {
     if (new Set(g.map(x => x.date)).size === 1) { out.push(...g); continue }
     const newest = Math.max(...g.map(x => x.posted || 0))
     const keep = g.filter(x => (x.posted || 0) === newest)
     const keepDates = new Set(keep.map(x => x.date))
-    const old = [...new Set(g.filter(x => (x.posted || 0) !== newest).map(x => x.date))].filter(d => !keepDates.has(d)).sort()
+    let old = [...new Set(g.filter(x => (x.posted || 0) !== newest).map(x => x.date))].filter(d => !keepDates.has(d)).sort()
+    // Numarasız quiz/sınav her hafta yeniden duyurulur ("Quiz Pazartesi"). Eski tarih, yeni duyuru yazıldığında
+    // zaten geçmişse bu bir tarih değişikliği değil, sıradaki quizdir.
+    if (["quiz", "exam"].includes(gk.slice(gk.lastIndexOf("|") + 1))) {
+      const written = ymd(new Date(newest * 1000))
+      old = old.filter(d => d >= written)
+    }
     // uyarı, değişiklik tazeyken ya da eski tarih henüz geçmemişken işe yarar; sonrası tekrar olur
     const fresh = newest > now() / 1000 - STALE_DAYS * 86400 || (old.length > 0 && daysBetween(now(), old[old.length - 1]) >= 0)
     keep.forEach(x => { if (old.length && fresh) x.changed_from = old[old.length - 1] })
@@ -617,8 +647,18 @@ const normTitle = t => lowerEn(t).replace(/[^\p{L}\p{N} ]+/gu, " ").split(/\s+/)
 const sameThing = (a, b) => { const x = normTitle(a), y = normTitle(b); return Boolean(x && y) && (x.includes(y) || y.includes(x)) }
 // "Exam review session", "Quiz 1 objection", "sınav kağıdı inceleme": sınavın kendisi değil, sonrası
 const RE_EXAM_AFTERMATH = /objection|itiraz|review|grades?(?![\p{L}])|results?(?![\p{L}])|papers?(?![\p{L}])|viewing|re-?evaluation|scheduler|notlar|sonuç|kağıt|inceleme/iu
-const isExam = e => ["midterm", "final", "quiz", "exam"].includes((e.type || "").toLowerCase()) ||
-  (e.type || "").toLowerCase().includes("quiz") || (EXAM_RE.test(e.title || "") && !RE_EXAM_AFTERMATH.test(e.title || ""))
+// Adında sınav kelimesi geçse de teslim/anket olan Moodle kayıtları ("Midterm Project Report" ödevi) sınav değildir
+const DEADLINE_TYPES = new Set(["assign", "ödev teslimi", "assignment", "project", "feedback", "choice", "scheduler", "workshop",
+  "folder", "resource", "url", "page", "label", "forum", "questionnaire", "survey", "data", "glossary", "wiki"])
+const CALENDAR_TYPES = new Set(["", "course", "user", "site", "group", "category", "etkinlik"])
+function isExam(e) {
+  const t = (e.type || "").toLowerCase()
+  if (["midterm", "final", "quiz", "exam"].includes(t) || t.includes("quiz")) return true
+  if (DEADLINE_TYPES.has(t)) return false
+  return EXAM_RE.test(e.title || "") && !RE_EXAM_AFTERMATH.test(e.title || "")
+}
+// Moodle'da 00:00 teslim = önceki gecenin sonu: karşılaştırmalar gösterilen güne göre yapılır
+const shownDay = e => { const d = fromYmd(e.date); return ymd(e.time === "00:00" ? addDays(d, -1) : d) }
 
 function mergedEvents(struct, docEvents, asOf) {
   const prio = { "moodle ödev": 0, "moodle quiz": 1, "moodle": 2, "moodle takvim": 3 }
@@ -628,11 +668,38 @@ function mergedEvents(struct, docEvents, asOf) {
     out.push({ ...e })
   }
   const exactSlots = new Set(out.map(o => [o.course, exactSlot(o)]).filter(x => x[1]).map(x => x.join("|")))
+  const fam = t => ["assignment", "project"].includes(t) ? "work" : t      // ödev ve proje teslimi aynı aile
   for (const e of docEvents) {
-    if ((e.type || "other") === "other") continue
+    const typ = e.type || "other"
+    if (typ === "other") continue
     const sl = examSlot(e)
     if (sl && exactSlots.has(e.course + "|" + sl)) continue
-    if (out.some(o => o.course === e.course && o.date === e.date && (isExam(o) === isExam(e) || sameThing(o.title, e.title)))) continue
+    const day = shownDay(e), item = String(e.item || ""), notif = item.startsWith("notif:")
+    if (["assignment", "project"].includes(typ) && /^(assign|mod|cal):/.test(item)) {
+      // Tarih, bir ödevin KENDİ açıklamasından geliyor. Moodle'daki teslim tarihiyle aynıysa tekrardır; birkaç gün
+      // farklıysa ayrı bir iş değil, hocanın yazdığı tarihle sistemdeki tarihin çelişkisidir (uyarıyla tek satır).
+      // Daha uzak bir tarih ayrı bir aşamadır ("taslak 10 Kas") ve ayrı kalır.
+      const own = out.find(o => o.certainty === "exact" && o.course === e.course && !/\(açılış\)$/.test(o.title) &&
+        sameThing(o.title, e.source || ""))
+      const gap = own ? Math.abs(daysBetween(fromYmd(shownDay(own)), day)) : null
+      if (own && gap === 0) continue
+      if (own && gap <= 3) {
+        own.text_dates = own.text_dates || []
+        if (!own.text_dates.includes(e.date)) own.text_dates.push(e.date)
+        continue
+      }
+    }
+    // aynı şey mi? Tek istisna: bir teslimle aynı güne düşen, SAATİ FARKLI itiraz oturumu / ders değişikliği ayrı
+    // bir olaydır (saatler aynıysa Moodle kaydı zaten o oturumdur: randevu modülü)
+    if (out.some(o => {
+      if (o.course !== e.course && !notif) return false
+      if (shownDay(o) !== day) return false
+      const exact = o.certainty === "exact"
+      return (isExam(o) && isExam(e)) || sameThing(o.title, e.title) || (!exact && fam(o.type) === fam(typ)) ||
+        (notif && isExam(o) === isExam(e)) ||
+        (exact && !isExam(o) && !isExam(e) && !(["review", "class_change"].includes(typ) &&
+          !CALENDAR_TYPES.has((o.type || "").toLowerCase()) && o.time && e.time && o.time !== e.time))
+    })) continue
     out.push({ ...e })
   }
   for (const e of out) {
@@ -686,20 +753,33 @@ function diffSummary(oldText, newText, limit = 110) {
   const res = out.join(" · ")
   return res.length <= limit ? res : res.slice(0, limit - 1) + "…"
 }
-let archiveCache = null
+let archiveCache = null, archiveVersions = null
+function loadArchive() {
+  if (archiveCache) return
+  archiveCache = {}; archiveVersions = {}
+  try {
+    const p = fm.joinPath(dir(), "archive.jsonl")
+    if (fm.fileExists(p)) for (const line of fm.readString(p).split("\n")) {
+      if (!line) continue
+      try { const r = JSON.parse(line); archiveCache[r.key] = r.text || ""; archiveVersions[r.key + "\u0000" + r.version] = r.text || "" } catch (e) {}
+    }
+  } catch (e) {}
+}
 function archiveLastText(key) {       // bir öğenin arşivdeki son (yani önceki) sürümünün metni
-  if (!archiveCache) {
-    archiveCache = {}
-    try {
-      const p = fm.joinPath(dir(), "archive.jsonl")
-      if (fm.fileExists(p)) for (const line of fm.readString(p).split("\n")) {
-        if (!line) continue
-        try { const r = JSON.parse(line); archiveCache[r.key] = r.text || "" } catch (e) {}
-      }
-    } catch (e) {}
-  }
+  loadArchive()
   return archiveCache[key]
 }
+function archiveVersionText(key, version) {   // bir öğenin arşivdeki belirli bir sürümünün metni (yoksa undefined)
+  loadArchive()
+  return archiveVersions[key + "\u0000" + version]
+}
+// Moodle bazen içeriğe dokunmadan sürümü değiştirir: teslim saati geçince "Closes:" etiketi "Closed:" olur, bir
+// tartışmaya cevap gelince "değiştirilme zamanı" ilerler. Başlık ve metin (tarih satırlarında etiket hariç) aynıysa
+// bu bir güncelleme değildir.
+const RE_DATE_LABEL = /^[^\n]{1,60}?: (\d{4}-\d\d-\d\d \d\d:\d\d) \S+$/gm
+const normText = t => String(t || "").replace(RE_DATE_LABEL, "$1").trim()
+const sameContent = (oldTitle, oldText, title, text) => typeof oldText === "string" &&
+  unescapeHtml(oldTitle || "") === (title || "") && normText(oldText) === normText(text)
 
 // Moodle'dan gelen veriyi kayıtlara işle; yeni duyuruları ve notları döndür
 function ingest(st, data) {
@@ -711,6 +791,19 @@ function ingest(st, data) {
     const prev = st.seen[it.key]
     if (prev !== it.version) {
       const old = st.extracted[it.key]
+      if (prev && old && !it.file) {
+        // kayıttaki metin 2000 karakterde kesilir; uzun metinlerde (ya da eski kayıtlarda) arşivdeki tam hâline bak
+        const was = old.version === prev && typeof old.text === "string" && old.text.length < 2000 ? old.text : archiveVersionText(it.key, prev)
+        if (sameContent(old.title, was, it.title, it.text)) {
+          old.version = it.version                       // içerik aynı: haber değil, sadece yeni sürüm kayda geçer
+          old.text = String(it.text || "").slice(0, 2000)
+          if (rescan) old.events = freeExtract(it).events
+          arch.push({ at: nowTs, key: it.key, version: it.version, course: it.course, kind: it.kind, title: it.title,
+            time: it.time, text: it.text, events: old.events })
+          st.seen[it.key] = it.version
+          continue
+        }
+      }
       const ex = freeExtract(it)
       ex.course = it.course; ex.title = it.title; ex.kind = it.kind; ex.url = it.url
       ex.posted = it.time || 0; ex.version = it.version
@@ -744,7 +837,7 @@ function ingest(st, data) {
   const blocked = WARNINGS.some(w => /^(core_course_get_contents|mod_forum_|mod_assign_|mod_quiz_|core_calendar_)/.test(w) && !/disabled/i.test(w))
   for (const [k, ex] of Object.entries(st.extracted)) {
     if (live.has(k)) { delete st.missingSince[k]; ex.hidden = false }
-    else if (!blocked) {
+    else if (!blocked && !arr(data.noHide).some(p => k.startsWith(p))) {
       st.missingSince[k] = st.missingSince[k] || nowTs
       if (nowTs - st.missingSince[k] > 36 * 3600) ex.hidden = true
     }
@@ -820,10 +913,20 @@ function isStale(n, asOf) {
   return annFacts(n.events, asOf, 1).length === 0
 }
 // Tarihli bilgi çıkmayan duyuru için tek kısa cümle (selam satırı atlanır)
-function gist(text, limit = 90) {
+// "Please note that …" gibi girişler atılır ki cümlenin asıl bilgisi (sınıf, saat) kesilmeden sığsın
+const RE_LEAD_IN = new RegExp("^(?:(?:please|kindly)\\s+)*(?:note|be informed|be advised|be reminded|be aware)\\s+that\\s+" +
+  "|^(?:this is|just)\\s+(?:a\\s+)?(?:(?:kind|quick|friendly|gentle)\\s+)?reminder\\s+that\\s+" +
+  "|^(?:i|we)\\s+(?:would|want|wish)\\s+(?:like\\s+)?to\\s+(?:inform|remind|announce|let)\\s+(?:to\\s+)?(?:you\\s+)?" +
+  "(?:all\\s+)?(?:know\\s+)?that\\s+", "i")
+// Moodle'ın kalın/italik etiketlerinden kalan boşlukları toplar: "ET01 , in M100 ." -> "ET01, in M100."
+const tidy = s => String(s || "").replace(/\s+/g, " ").replace(/\s+([,.;:!?])(?=\s|$)/g, "$1")
+  .replace(/\s+\)/g, ")").replace(/\(\s+/g, "(").trim()
+function gist(text, limit = 120) {
   const body = stripHello(String(text || "").replace(/^Gönderen:[\s\S]*?\n\n/, "")).trim()
-  const first = body ? body.split(/(?<=[.!?])\s+|\n/)[0] : ""
-  return cut(first.replace(/\s+/g, " ").trim(), limit)
+  let first = body ? tidy(body.split(/(?<=[.!?])\s+|\n/)[0]) : ""
+  const core = first.replace(RE_LEAD_IN, "")
+  if (core && core !== first) first = core[0].toUpperCase() + core.slice(1)
+  return cut(first, limit)
 }
 const FILLER = new Set(("the a an has have had been is are was were be to on in at for of and or it this that now please you your can " +
   "find see check uploaded posted announced available shared published added attached moodle page course " +
@@ -890,7 +993,7 @@ function buildModel(st, asOf) {
   const doc = []
   for (const [k, ex] of Object.entries(st.extracted)) {
     if (ex.hidden) continue
-    for (const e of ex.events || []) doc.push({ ...e, course: ex.course, posted: ex.posted || 0, url: ex.url || "" })
+    for (const e of ex.events || []) doc.push({ ...e, course: ex.course, posted: ex.posted || 0, url: ex.url || "", item: k, source: ex.title || "" })
   }
   const evs = mergedEvents(st.lastStruct || [], supersede(doc), asOf)
   const todays = evs.filter(e => e._n === 0)
@@ -960,7 +1063,9 @@ function briefHtml(m) {
     `${e.certainty === "approximate" && e.url ? ` <a class=src href="${esc(e.url)}">duyuru ›</a>` : ""}` +
     `${e.certainty === "approximate" && (e.title || "").length > 45 ? `<div class=q>“${esc(e.title)}”</div>` : ""}` +
     `${e.changed_from ? `<div class=w>⚠️ tarih değişti (eskisi ${esc(trDate(fromYmd(e.changed_from)))})</div>` : ""}` +
-    `${e.weekday_mismatch ? `<div class=w>⚠️ gün adı tarihle uyuşmuyor, kontrol et</div>` : ""}</li>`
+    `${e.weekday_mismatch ? `<div class=w>⚠️ gün adı tarihle uyuşmuyor, kontrol et</div>` : ""}` +
+    `${(e.text_dates || []).length ? `<div class=w>⚠️ açıklamasında ${esc(e.text_dates.slice().sort().map(x => dayMon(fromYmd(x))).join(", "))} yazıyor, ` +
+      `Moodle'da ${esc(dayMon(e._d))} — kontrol et</div>` : ""}</li>`
   let weekHtml = ""
   let cur = null
   for (const e of m.week) {
@@ -1382,7 +1487,7 @@ async function settings(st, base) {
 // Testler bu dosyayı __TEST__ ile yükler ve iç fonksiyonları alır
 if (typeof __TEST__ !== "undefined") {
   __EXPORTS__.api = { regexDates, freeExtract, supersede, mergedEvents, buildModel, ingest, notificationText, briefHtml,
-    shortCourse, examSlot, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setGet: f => { httpGet = f }, setFm: f => { fm = f },
+    shortCourse, examSlot, isExam, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setGet: f => { httpGet = f }, setFm: f => { fm = f },
     loadState, saveState, nextSendDate, reminderTime, scheduleReminders, instantNotify, remKind, stripHello, checkUpdate, cmpVer, settings, VERSION, annFacts, isStale, gist, addsToTitle, filterOther, groupOther, widget, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr, gradesFromTable }
 } else {
   await main()

@@ -43,7 +43,7 @@ global.URLScheme = { forRunningScript: () => "scriptable:///run/x" }
   check("eskimiş değil: not ve dosya", [A.isStale({ kind: "not", posted: old }, T0), A.isStale({ kind: "dosya", posted: old }, T0)], [false, false])
   check("eskimiş değil: tarihi bilinmiyor", A.isStale({ kind: "duyuru", posted: 0, events: [] }, T0), false)
   check("tek cümle: selam atlanır, ilk cümle", A.gist("Gönderen: T\nTarih: x\n\nHello,\nOffice hours moved to TB215. See you there."), "Office hours moved to TB215.")
-  check("tek cümle: uzun cümle kısalır", A.gist("A".repeat(200)).length, 90)
+  check("tek cümle: uzun cümle kısalır", A.gist("A".repeat(200)).length, 120)
 
   check("başlığı tekrar eden cümle yazılmaz", [A.addsToTitle("The Class & Seating Plan for MT2 has been uploaded to Moodle.", "Class & Seating Plan for MT2"),
     A.addsToTitle("Office hours moved to TB215.", "Office hours"), A.addsToTitle("Yarınki ders iptal edildi.", "Ders hakkında"), A.addsToTitle("", "x")],
