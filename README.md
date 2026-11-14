@@ -69,6 +69,9 @@ flowchart LR
 - *"The exam will be held on Nov 17"*: the generic "exam" is refined to *midterm* from the previous
   sentence or the post title.
 - Syllabus numbering (`2.1`, `Section 4.5`), version numbers and room numbers are not dates.
+- *"Quiz 2 may be postponed"* is not the 2nd of May, *"Finally, …"* is not a final, *"no class due to the
+  holiday"* is not a deadline, and *"at 9.12"* is a time, not 9 December.
+- An assignment called *"Midterm Project Report"* is a deadline, not an exam.
 - When announcements disagree, the most recently posted one wins, and the brief shows ⚠️ with the old date.
 
 **Never send a wrong brief.** Errors are classified as permanent (a disabled Moodle feature: skip that section),
@@ -83,6 +86,14 @@ deleted, and only after 3 consecutive clean runs, so a temporary outage can't hi
 these are merged into one line. Updated items say *what* changed (`Recordings — + R8`) instead of a bare
 "updated". New or changed grades get their own section, and grades that existed before tracking started
 stay quiet.
+
+**"Changed" means the content changed.** Moodle bumps an item's version without touching its content: when a
+deadline passes, the label *Closes:* becomes *Closed:*; when someone replies, the thread's modified time
+moves. The brief compares against the version you last saw and stays quiet when title and text are the same.
+
+**When Moodle disagrees with itself, say so.** If an assignment closes on the 16th but its own description
+says "due November 15", that is one line with a ⚠️, not two unrelated-looking deadlines. Submitted
+assignments are marked ✓.
 
 **Scheduling you can trust.** GitHub's built-in cron didn't fire at all on a new repo, so an external
 scheduler triggers the workflow. The script is idempotent (one brief per day, lock file, retries until noon),
@@ -119,7 +130,7 @@ once per day after `SEND_TIME`). Configuration goes in `.env` (see `.env.example
 ```bash
 pip install -r requirements.txt
 python demo.py      # fake Moodle, prints the brief
-pytest -q           # 76 tests: date parsing, failure modes, grades, de-duplication, no-delete guarantees
+pytest -q           # 111 tests: date parsing, failure modes, grades, de-duplication, no-delete guarantees
 ```
 
 ## iPhone version

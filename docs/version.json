@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
-  "notes": "Brifing kısaldı: boş bölümler yok, duyurularda sadece kritik bilgi, eski haberler gösterilmiyor.",
+  "version": "1.6.0",
+  "notes": "Yanlış 'güncellendi' ve yanlış sınav uyarıları giderildi; açıklamadaki tarih Moodle'daki teslim tarihiyle çelişirse uyarır.",
   "url": "https://kodmir.github.io/moodle-daily-brief/"
 }
