@@ -165,6 +165,19 @@ def test_evening_reminder(env, monkeypatch):
     assert len(tg.sent) == 1                                         # once per evening
 
 
+def test_reminder_is_not_sent_late_at_night(env, monkeypatch):
+    """GitHub's own scheduler can fire hours late. A reminder at 23:30 or 03:00 helps nobody."""
+    mb, moodle, tg = env
+    setup_evening(mb, moodle, tg, monkeypatch)
+    at(mb, monkeypatch, 23, 5)
+    assert run(mb, "run", "--scheduled") == 0 and tg.sent == []
+    at(mb, monkeypatch, 3, 30, day=6)                                # after midnight: not yesterday's reminder,
+    assert run(mb, "run", "--scheduled") == 0 and tg.sent == []      # and not yet the morning brief
+    at(mb, monkeypatch, 22, 59)
+    run(mb, "run", "--scheduled")
+    assert len(tg.sent) == 1 and "Yarın" in tg.last
+
+
 def test_evening_with_nothing_ahead_stays_silent(env, monkeypatch):
     mb, moodle, tg = env
     moodle.posts = [(101, 1, "Slides", "Slides are uploaded.", NOW - DAY)]

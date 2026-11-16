@@ -2147,7 +2147,8 @@ def _reminder_due(state: Dict[str, Any], today: str) -> bool:
     except Exception:
         return False  # "off" ya da okunamayan değer: hatırlatma kapalı
     n = datetime.now(TZ)
-    return (n.hour, n.minute) >= (hh, mm)
+    # Zamanlayıcı saatlerce gecikebilir (GitHub'ın kendi cron'u): gece 23'ten sonra hatırlatma atılmaz
+    return (hh, mm) <= (n.hour, n.minute) < (23, 0)
 
 
 def _acquire_lock():

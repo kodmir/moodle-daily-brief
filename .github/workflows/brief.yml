@@ -11,9 +11,13 @@ on:
     - cron: "37 4 * * *"
     - cron: "7 6 * * *"
     - cron: "7 8 * * *"
-    # Evening reminder (20:07 TRT, plus one fallback slot): sends only if something is due tonight or tomorrow.
+    # Evening reminder: sent once, by the first run between REMINDER_TIME (20:00) and 23:00 TRT, and only if
+    # something is due tonight or tomorrow. GitHub's scheduler can be hours late, so there are several slots;
+    # for an exact time add a second cron-job.org job at 20:00 (same request as the morning one).
     - cron: "7 17 * * *"
+    - cron: "37 17 * * *"
     - cron: "7 18 * * *"
+    - cron: "7 19 * * *"
   workflow_dispatch:
     inputs:
       mode:
