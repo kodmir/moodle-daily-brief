@@ -172,14 +172,16 @@ once per day after `SEND_TIME`). Configuration goes in `.env` (see `.env.example
 **Evening reminder.** After `REMINDER_TIME` (default 20:00) a second, short message lists tomorrow's exams and
 deadlines and anything still due tonight. Submitted assignments are left out, and if there is nothing to say,
 nothing is sent. Set the repository variable (or `.env` line) `REMINDER_TIME=off` to disable it, or run
-`python moodle_brief.py remind` to ask for it at any time.
+`python moodle_brief.py remind` to ask for it at any time. It is sent by the first scheduled run between
+`REMINDER_TIME` and 23:00; GitHub's own scheduler can be hours late, so for an exact time add a second
+cron-job.org job at 20:00 with the same request as the morning one.
 
 ## Try it without any account
 
 ```bash
 pip install -r requirements.txt
 python demo.py      # fake Moodle, prints the brief
-pytest -q                     # 149 tests: date parsing, failure modes, grades, reminders, fuzz
+pytest -q                     # 150 tests: date parsing, failure modes, grades, reminders, fuzz
 python tests/parity/run.py    # Python vs. iPhone script on 5,600 generated cases (needs Node)
 for f in tests/ios/*.js; do node "$f"; done    # the iPhone port's own suites
 ```
