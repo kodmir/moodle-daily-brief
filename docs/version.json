@@ -1,5 +1,5 @@
 {
-  "version": "1.6.0",
-  "notes": "Yanlış 'güncellendi' ve yanlış sınav uyarıları giderildi; açıklamadaki tarih Moodle'daki teslim tarihiyle çelişirse uyarır.",
+  "version": "1.7.0",
+  "notes": "Sınav yeri ve sınıf ortalaması gösteriliyor; sınavdan önceki akşam hatırlatma; bozuk karakterli duyuru artık çökertmiyor.",
   "url": "https://kodmir.github.io/moodle-daily-brief/"
 }

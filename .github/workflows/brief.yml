@@ -11,6 +11,9 @@ on:
     - cron: "37 4 * * *"
     - cron: "7 6 * * *"
     - cron: "7 8 * * *"
+    # Evening reminder (20:07 TRT, plus one fallback slot): sends only if something is due tonight or tomorrow.
+    - cron: "7 17 * * *"
+    - cron: "7 18 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -75,6 +78,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SEND_TIME: ${{ vars.SEND_TIME || '07:00' }}
+          REMINDER_TIME: ${{ vars.REMINDER_TIME || '20:00' }}   # "off" disables the evening reminder
         run: |
           if [ "${{ github.event_name }}" != "schedule" ] && [ "${{ inputs.mode }}" != "scheduled" ]; then
             python moodle_brief.py run --force

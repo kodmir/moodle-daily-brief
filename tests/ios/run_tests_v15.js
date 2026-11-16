@@ -120,7 +120,7 @@ global.URLScheme = { forRunningScript: () => "scriptable:///run/x" }
   check("html: eski başlıklar yok", ["Diğer (", "Yeni duyurular (", "Yeni notlar ("].filter(w => text.includes(w)), [])
   const nt = A.notificationText(m).split("\n")
   check("bildirim: duyuru satırında kritik bilgi", nt.find(l => l.startsWith("📣")),
-    "📣 IE306 Class & Seating Plan for MT2 → Quiz yarın 12:00 · IE306 Office hours · +1")
+    "📣 IE306 Class & Seating Plan for MT2 → Quiz yarın 12:00 · M100 · IE306 Office hours · +1")
   check("bildirim: 'Bugün kayıtlı bir şey yok' yazılmaz", nt.some(l => /kayıtlı bir şey yok|kalan bir şey yok/.test(l)), false)
 
   // ---- "tarih değişti" uyarısı: tazeyken ya da eski tarih geçmemişken

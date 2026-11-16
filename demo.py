@@ -40,7 +40,7 @@ for c in COURSES:
 POSTS = {  # course id -> [(discussion id, subject, body, created)]
     1: [(11, "Midterm Exam Announcement", f"The IE310 midterm will be held on {en(4)}, 17:00-19:00.", now - 30 * D),
         (12, "Midterm Date Updated", f"Dear all, the midterm date has been updated. The exam will be held on {en(9)}, "
-                                     f"from 17:00 to 19:00, in M2. Seat assignments will be announced later.", now - 2 * D)],
+                                     f"from 17:00 to 19:00, in NH101 and NH102. Seat assignments will be announced later.", now - 2 * D)],
     2: [(21, "Problem Set 4", f"PS4 is uploaded. It is due {en(2)} at 23:59 via Moodle.", now - 3 * 3600),
         (22, "Quiz 1 grades", "Quiz 1 grades are announced. Objections until Friday.", now - 5 * 3600)],
     3: [(31, "Tomorrow's lecture is cancelled", "Tomorrow's lecture is cancelled. Make-up lecture will be scheduled later.",
@@ -71,7 +71,7 @@ def fake_call(self, fn, **p):
             return {"usergrades": []}
         return {"usergrades": [{"gradeitems": [{"id": 1, "itemname": "Quiz 1", "itemtype": "mod", "graderaw": 82,
                                                 "gradeformatted": "82.00", "grademax": 100, "feedback": "",
-                                                "gradedategraded": now - 5 * 3600}]}]}
+                                                "gradedategraded": now - 5 * 3600, "averageformatted": "67.40"}]}]}
     if fn == "mod_quiz_get_quizzes_by_courses":
         return {"quizzes": [{"id": 7, "course": 3, "name": "Quiz 2", "timeopen": int((today + timedelta(days=1)).replace(hour=10, minute=0).timestamp()), "timeclose": 0, "intro": ""}]}
     return {}
