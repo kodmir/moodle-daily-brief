@@ -12,8 +12,8 @@
 // Kayıtlar asla silinmez; eskiyen ya da Moodle'dan kalkan öğeler sadece gösterilmez.
 // ------------------------------------------------------------------------------------------
 
-const VERSION = "1.7.0"
-const RULES = "4"                        // tarih çıkarma kuralları değişince artar: kayıtlı duyurular yeniden taranır
+const VERSION = "1.7.1"
+const RULES = "5"                        // tarih çıkarma kuralları değişince artar: kayıtlı duyurular yeniden taranır
 const DEFAULT_URL = "https://moodle.bogazici.edu.tr"
 const KC_TOKEN = "moodlebrief.token"
 const KC_URL = "moodlebrief.url"
@@ -411,7 +411,8 @@ async function collect(base, token, replyCache) {
   items.forEach(it => { uniq[it.key] = it })
   const sd = {}
   struct.forEach(e => { sd[hash(e.course, e.title, e.date, e.time)] = e })
-  return { user: info.fullname, items: Object.values(uniq), struct: Object.values(sd), replyCache: newCache, courses,
+  const lastname = (typeof info.lastname === "string" && info.lastname.trim()) || String(info.fullname || "").trim().split(/\s+/).pop() || ""
+  return { user: info.fullname, lastname, items: Object.values(uniq), struct: Object.values(sd), replyCache: newCache, courses,
     noHide: capped ? ["disc:", "reply:", "att:"] : [] }
 }
 
@@ -455,8 +456,9 @@ const RE_NOT_EVENT_AFTER = new RegExp(
   "(?:announced|posted|shared|published|released|made)" +
   "|^s?\\S*\\s*(?:\\S+\\s+){0,3}(?:duyurulacak|açıklanacak|ilan edilecek|paylaşılacak)")
 const RE_NOT_EVENT_BEFORE = /(?:before|after|for|until|prior to|öncesi|sonrası|için)\s+(?:the\s+)?$/
-const RE_OLD_BEFORE = /(?:\bfrom|instead of|rather than|previously|originally|was scheduled (?:for|on)|was planned (?:for|on)|moved from|eski tarih|önceki tarih)\s*(?:the\s+|on\s+)?$/
-const RE_OLD_AFTER = /^\s*(?:'?(?:dan|den|tan|ten)\b)?\s*(?:tarihinden|tarihindeki|yerine)/
+// "I mentioned 1st of December as the possible exam date, but …", "daha önce 1 Aralık demiştim" de eski tarihtir
+const RE_OLD_BEFORE = /(?:\bfrom|instead of|rather than|previously|originally|was scheduled (?:for|on)|was planned (?:for|on)|moved from|eski tarih|önceki tarih|daha önce|\b(?:i|we)\s+(?:had\s+)?(?:mentioned|announced|said|stated|wrote|told you)(?:\s+that)?)\s*(?:the\s+|on\s+)?$/
+const RE_OLD_AFTER = /^\s*(?:'?(?:dan|den|tan|ten)\b)?\s*(?:tarihinden|tarihindeki|yerine|as (?:the|a) (?:possible|tentative|initial|original|probable)|demiştim|demiştik|olarak duyur(?:ul)?muştu|olarak açıklanmıştı)/
 const RE_REL_DAY = new RegExp(WL + "(yarın(?:ki|da)?|yarin(?:ki|da)?|tomorrow|bugün(?:kü|ki)?|bugun(?:ku|ki)?|today|tonight|bu akşam(?:ki)?)" + WR, "gu")
 const RE_REL_WD = new RegExp(WL + "(this|next|coming|on|bu|önümüzdeki|gelecek|haftaya)\\s+(?:week\\s+|hafta(?:ki)?\\s+)?(" + WD_ALT + ")" + WR, "gu")
 const SPECIFIC_EXAMS = ["midterm", "final", "quiz"]
@@ -621,6 +623,8 @@ function regexDates(text, posted = null, title = "", course = "") {
       }
     }
   }
+  const seats = findSeats(text), exams = Object.values(found).filter(ev => EXAM_TYPES.includes(ev.type))
+  if (seats.length && exams.length === 1) exams[0].seats = seats   // dağılımın hangi sınava ait olduğu ancak tek sınav varsa bellidir
   return Object.values(found)
 }
 
@@ -655,6 +659,47 @@ function findPlace(sentence, course = "", whole = "") {
     }
   }
   return ""
+}
+
+// Soyada göre salon dağılımı:  "AÇ – İNCEBOY: M1100"  /  "M1170: İPEK – ZELKA"
+const NAME = "[A-Za-zÇĞİÖŞÜçğıöşüÂâÎîÛû]+(?:[ '’][A-Za-zÇĞİÖŞÜçğıöşüÂâÎîÛû]+)?"
+const RE_SEAT = new RegExp("^\\s*[-•*]?\\s*(" + NAME + ")\\s*[–—-]+\\s*(" + NAME + ")\\s*[:=→>]*\\s*\\(?(" + ROOM + ")\\)?\\s*[.,;]?\\s*$", "gm")
+const RE_SEAT_REV = new RegExp("^\\s*[-•*]?\\s*\\(?(" + ROOM + ")\\)?\\s*[:=→>]+\\s*(" + NAME + ")\\s*[–—-]+\\s*(" + NAME + ")\\s*[.,;]?\\s*$", "gm")
+const TR_ALPHA = "ABCÇDEFGĞHIİJKLMNOÖPQRSŞTUÜVWXYZ"
+// Türkçe alfabe sırasına göre karşılaştırma anahtarı (Ö, O ile P arasındadır; i→İ, ı→I)
+function trKey(s) {
+  const up = String(typeof s === "string" ? s : "").replace(/i/g, "İ").replace(/ı/g, "I").toUpperCase()
+    .replace(/Â/g, "A").replace(/Î/g, "İ").replace(/Û/g, "U")
+  return [...up].map(ch => TR_ALPHA.indexOf(ch)).filter(i => i >= 0)
+}
+function cmpKey(a, b) {       // dizileri sözlük sırasıyla karşılaştırır
+  for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i]
+  return a.length - b.length
+}
+// Duyurudaki soyadı aralıkları ve salonları: [[alt, üst, salon], …]. En az iki satır, aralıklar artan ve
+// çakışmasız olmalı; değilse (liste başka bir şeydir) boş döner.
+function findSeats(text) {
+  const rows = [...String(text || "").matchAll(RE_SEAT)].map(m => [m[1], m[2], m[3]])
+    .concat([...String(text || "").matchAll(RE_SEAT_REV)].map(m => [m[2], m[3], m[1]]))
+  const out = []
+  let last = null
+  for (const [lo, hi, room] of rows) {
+    const kl = trKey(lo), kh = trKey(hi), code = roomsOf(room, "")
+    if (!kl.length || !kh.length || !code || cmpKey(kl, kh) > 0 || (last && cmpKey(kl, last) <= 0)) return []
+    last = kh
+    out.push([lo.trim(), hi.trim(), code])
+  }
+  return out.length >= 2 ? out : []
+}
+// Soyadın düştüğü tek aralık ([alt, üst, salon]); hiçbirine ya da birden fazlasına düşüyorsa null
+function seatFor(lastname, seats) {
+  const k = trKey(lastname), hits = []
+  for (const row of Array.isArray(seats) ? seats : []) {
+    if (!Array.isArray(row) || row.length !== 3) return null
+    const lo = trKey(row[0]), hi = trKey(row[1])
+    if (k.length && cmpKey(lo, k) <= 0 && cmpKey(k.slice(0, hi.length), hi) <= 0) hits.push(row)
+  }
+  return hits.length === 1 ? hits[0] : null
 }
 
 function freeExtract(it) {
@@ -707,7 +752,9 @@ function supersede(evs) {
       old = old.filter(d => d >= written)
     }
     // uyarı, değişiklik tazeyken ya da eski tarih henüz geçmemişken işe yarar; sonrası tekrar olur
-    const fresh = newest > now() / 1000 - STALE_DAYS * 86400 || (old.length > 0 && daysBetween(now(), old[old.length - 1]) >= 0)
+    // değişiklik, yeni tarihi İLK veren duyuruyla olmuştur; sonradan gelen hatırlatma onu tazelemez
+    const changedAt = Math.min(...g.filter(x => keepDates.has(x.date)).map(x => x.posted || 0))
+    const fresh = changedAt > now() / 1000 - STALE_DAYS * 86400 || (old.length > 0 && daysBetween(now(), old[old.length - 1]) >= 0)
     keep.forEach(x => { if (old.length && fresh) x.changed_from = old[old.length - 1] })
     out.push(...keep)
   }
@@ -729,6 +776,8 @@ function isExam(e) {
   if (DEADLINE_TYPES.has(t)) return false
   return EXAM_RE.test(e.title || "") && !RE_EXAM_AFTERMATH.test(e.title || "")
 }
+// aynı olayın iki kaydı birleşirken yer bilgisi kaybolmasın
+const carryPlace = (o, e) => { for (const k of ["place", "my_place", "my_range"]) if (e[k] && !o[k]) o[k] = e[k] }
 // Moodle'da 00:00 teslim = önceki gecenin sonu: karşılaştırmalar gösterilen güne göre yapılır
 const shownDay = e => { const d = fromYmd(e.date); return ymd(e.time === "00:00" ? addDays(d, -1) : d) }
 
@@ -747,7 +796,7 @@ function mergedEvents(struct, docEvents, asOf) {
     const sl = examSlot(e)
     if (sl && exactSlots.has(e.course + "|" + sl)) {
       // Moodle'ın kendi kaydı daha güvenilir; ama yer bilgisi sadece duyuruda yazar, o kayda taşınır
-      if (e.place) for (const o of out) if (o.certainty === "exact" && o.course === e.course && exactSlot(o) === sl && !o.place) o.place = e.place
+      for (const o of out) if (o.certainty === "exact" && o.course === e.course && exactSlot(o) === sl) carryPlace(o, e)
       continue
     }
     const day = shownDay(e), item = String(e.item || ""), notif = item.startsWith("notif:")
@@ -776,7 +825,7 @@ function mergedEvents(struct, docEvents, asOf) {
         (exact && !isExam(o) && !isExam(e) && !(["review", "class_change"].includes(typ) &&
           !CALENDAR_TYPES.has((o.type || "").toLowerCase()) && o.time && e.time && o.time !== e.time))
     })
-    if (same) { if (e.place && !same.place) same.place = e.place; continue }
+    if (same) { carryPlace(same, e); continue }
     out.push({ ...e })
   }
   for (const e of out) {
@@ -924,6 +973,7 @@ function ingest(st, data) {
   st.lastStruct = data.struct
   st.lastFetch = nowTs
   st.user = data.user
+  st.lastname = data.lastname || ""       // sadece telefonda durur; soyada göre salon dağılımında kendi salonunu bulmak için
   return fresh
 }
 
@@ -1075,7 +1125,12 @@ function buildModel(st, asOf) {
   const doc = []
   for (const [k, ex] of Object.entries(st.extracted)) {
     if (ex.hidden) continue
-    for (const e of ex.events || []) doc.push({ ...e, course: ex.course, posted: ex.posted || 0, url: ex.url || "", item: k, source: ex.title || "" })
+    for (const e of ex.events || []) {
+      const d = { ...e, course: ex.course, posted: ex.posted || 0, url: ex.url || "", item: k, source: ex.title || "" }
+      const mine = seatFor(st.lastname || "", e.seats)     // salonlar soyada göre dağıtılmış: öğrencinin kendi salonu
+      if (mine) { d.my_place = mine[2]; d.my_range = `${mine[0]}–${mine[1]}` }
+      doc.push(d)
+    }
   }
   const evs = mergedEvents(st.lastStruct || [], supersede(doc), asOf)
   const todays = evs.filter(e => e._n === 0)
@@ -1110,6 +1165,7 @@ function cutLabel(s, n) {
 }
 // " · M100, M1170" — satırda zaten yazıyorsa (kısa duyuru cümlesi etiketin içindeyse) tekrarlanmaz
 function placeOf(e) {
+  if (e.my_place) return ` · ${e.my_place} (soyadına göre: ${e.my_range || ""})`    // doğrulayabilmesi için aralığıyla
   const rooms = String(e.place || "").split(", ").filter(Boolean), lab = label(e).replace(/(?<=[A-ZÇĞİÖŞÜ])[ -](?=\d)/g, "")
   return rooms.length && !rooms.every(r => lab.includes(r)) ? " · " + rooms.join(", ") : ""
 }
@@ -1286,7 +1342,8 @@ async function scheduleReminders(st, evs) {
       n.identifier = id
       n.threadIdentifier = "moodlebrief"
       n.title = `🎯 ${e.course} ${TYPE_LABEL[e.type] || "Sınav"} · ${dn <= 0 ? "Bugün" : "Yarın"}${e._t ? " " + e._t : ""}`
-      n.body = [e.place ? "Yer: " + e.place : "", e.certainty === "approximate" ? "Duyurudan çıkarıldı, teyit et." : e.title].filter(Boolean).join(" · ")
+      n.body = [e.my_place ? `Yer: ${e.my_place} (soyadına göre: ${e.my_range})` : e.place ? "Yer: " + e.place : "",
+        e.certainty === "approximate" ? "Duyurudan çıkarıldı, teyit et." : e.title].filter(Boolean).join(" · ")
       n.openURL = URLScheme.forRunningScript() + "?view=brief"
       n.setTriggerDate(at)
       await n.schedule()
@@ -1599,7 +1656,7 @@ async function settings(st, base) {
 // Testler bu dosyayı __TEST__ ile yükler ve iç fonksiyonları alır
 if (typeof __TEST__ !== "undefined") {
   __EXPORTS__.api = { regexDates, freeExtract, supersede, mergedEvents, buildModel, ingest, notificationText, briefHtml,
-    shortCourse, examSlot, isExam, findPlace, gradeStats, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setGet: f => { httpGet = f }, setFm: f => { fm = f },
+    shortCourse, examSlot, isExam, findPlace, findSeats, seatFor, gradeStats, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setGet: f => { httpGet = f }, setFm: f => { fm = f },
     loadState, saveState, nextSendDate, reminderTime, scheduleReminders, instantNotify, remKind, stripHello, checkUpdate, cmpVer, settings, VERSION, annFacts, isStale, gist, addsToTitle, filterOther, groupOther, widget, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr, gradesFromTable }
 } else {
   await main()

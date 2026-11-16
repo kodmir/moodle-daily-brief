@@ -151,6 +151,53 @@ global.URLScheme = { forRunningScript: () => "scriptable:///run/x" }
   check("ders kodu", [A.shortCourse("2026/2027-1 IE  306.01"), A.shortCourse("Fall 2026 IE 202 Section 1"), A.shortCourse("PHYS101L.03"), A.shortCourse("Turkish for Foreigners"), A.shortCourse("x".repeat(500)).length <= 24],
     ["IE306", "IE202", "PHYS101L", "Turkish for Foreigners", true])
 
+  // ================= 1.7.1: gerçek kullanımın ilk akşamında bulunanlar
+  const POST = "Dear all,\n This is a reminder that the IE202 Midterm will be held on November 6 (tomorrow), from 17:00 to 19:00 , in M1100 and M1170 .\n\n" +
+    " The classroom assignments are as follows, based on your surname:\n AÇ – İNCEBOY: M1100\n İPEK – ZELKA: M1170\n\n Please arrive 10 minutes before the exam begins .\n Best,\nTA"
+  // ---- açıklama içinde anılan eski tarih ikinci bir sınav değildir
+  check("anılan eski tarih sınav değil", A.regexDates("The third exam of the semester will be held on 2nd of December, Wednesday from 17:00 to 19:00 (Last week I " +
+    "mentioned 1st of December as the possible exam date, but had difficulty in finding exam rooms, so we shifted 1 day)\n There will be no lecture on the exam day", NOW, "Exam No 3", "IE306")
+    .map(e => [e.type, e.date, e.time]), [["exam", "2026-12-02", "17:00"]])
+  check("Türkçe: 'daha önce … demiştim'", A.regexDates("Final sınavı 12 Ocak Salı 10:00'da yapılacaktır, daha önce 11 Ocak demiştim.", NOW, "", "IE306").map(e => e.date), ["2027-01-12"])
+  check("iki ayrı tarih hâlâ okunur", A.regexDates("Quiz 1 is on November 9. Quiz 2 is on November 23.", NOW, "", "IE306").length, 2)
+  // ---- hatırlatma duyurusu eski tarih değişikliği uyarısını canlandırmaz
+  const mt = (date, posted) => ({ course: "IE202", type: "midterm", title: "midterm", date, posted })
+  let sup = A.supersede([mt("2026-11-01", NOW - 40 * DAY), mt("2026-11-17", NOW - 30 * DAY), mt("2026-11-17", NOW - DAY)])
+  check("eski değişiklik + yeni hatırlatma: uyarı yok", [sup.map(e => e.date), sup[0].changed_from], [["2026-11-17"], undefined])
+  check("taze değişiklik: uyarı var", A.supersede([mt("2026-11-01", NOW - 40 * DAY), mt("2026-11-17", NOW - 2 * DAY)])[0].changed_from, "2026-11-01")
+  // ---- soyada göre salon: Türkçe alfabe sırası
+  const seats = A.findSeats(POST), room = n => (A.seatFor(n, seats) || [])[2] || null
+  check("salon dağılımı okunur", seats, [["AÇ", "İNCEBOY", "M1100"], ["İPEK", "ZELKA", "M1170"]])
+  check("soyadına göre salon", ["Özbey", "Çelik", "Ilgaz", "İnce", "İpekçi", "şahin", "Zelkan"].map(room), ["M1170", "M1100", "M1100", "M1100", "M1170", "M1170", "M1170"])
+  check("aralık dışı soyad: tahmin yok", ["Abak", "Zorlu", ""].map(room), [null, null, null])
+  check("salon önce yazılmış biçim", A.findSeats("M100: Abak - Çelik\nM1170: Demir - Öz\nM2171: Öztürk - Zorlu"), [["Abak", "Çelik", "M100"], ["Demir", "Öz", "M1170"], ["Öztürk", "Zorlu", "M2171"]])
+  check("salon dağılımı olmayan listeler", [A.findSeats("Monday - Friday: NH101\nA - C: NH102"), A.findSeats("A – K: NH101"), A.findSeats("A - M: NH101\nK - Z: NH102"),
+    A.seatFor("Özbey", [["A", "Z", "M1"], ["B", "Y", "M2"]])], [[], [], [], null])
+  // ---- uçtan uca: kendi salonu brifingde, bildirimde ve akşam hatırlatmasında
+  st = fresh0()
+  M.posts = [post(101, "Midterm Exam", POST, NOW - 3600)]
+  const baseInfo = A.setPost
+  A.setPost(async (url, body) => {
+    const p = Object.fromEntries(body.split("&").map(kv => kv.split("=").map(decodeURIComponent))), fn = p.wsfunction
+    if (fn === "core_webservice_get_site_info") return { userid: 7, firstname: "Emir Eymen", lastname: "Özbey", fullname: "Emir Eymen Özbey" }
+    if (fn === "core_enrol_get_users_courses") return [{ id: 1, shortname: "2026/2027-1 IE  202.01", startdate: NOW - 60 * DAY, enddate: NOW + 60 * DAY }]
+    if (fn === "core_course_get_contents") return [{ id: 9, summary: "", modules: [] }]
+    if (fn === "mod_forum_get_forums_by_courses") return [{ id: 77, course: 1, type: "news" }]
+    if (fn === "mod_forum_get_forum_discussions") return { discussions: +p.page === 0 ? M.posts : [] }
+    return {}
+  })
+  await run(st)
+  m = A.buildModel(st, T0)
+  check("model: kendi salonu", m.exams.map(e => [e.place, e.my_place, e.my_range]), [["M1100, M1170", "M1170", "İPEK–ZELKA"]])
+  check("html: kendi salonu aralığıyla", strip(A.briefHtml(m)).includes("· M1170 (soyadına göre: İPEK–ZELKA)"), true)
+  check("bildirim: kendi salonu", A.notificationText(m).includes("🎯 IE202 Ara sınav · 6 Kas Cum · M1170 (soyadına göre: İPEK–ZELKA) (yarın)"), true)
+  scheduled.length = 0; st.reminders = {}; st.settings = Object.assign({}, st.settings, { deadlineReminders: true })
+  await A.scheduleReminders(st, m.all)
+  check("akşam hatırlatması: kendi salonu", scheduled.filter(n => n.identifier.includes(".exam.")).map(n => n.body), ["Yer: M1170 (soyadına göre: İPEK–ZELKA) · Duyurudan çıkarıldı, teyit et."])
+  st.lastname = "Abak"
+  m = A.buildModel(st, T0)
+  check("aralık dışı soyad: bütün salonlar", [m.exams[0].my_place, strip(A.briefHtml(m)).includes("· M1100, M1170")], [undefined, true])
+
   console.log(`\n${pass} geçti, ${fail} başarısız`)
   process.exit(fail ? 1 : 0)
 })().catch(e => { console.error("ÇALIŞMA HATASI:", e); process.exit(1) })

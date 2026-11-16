@@ -39,7 +39,9 @@ def tm():
     h, mi = rnd.randint(0, 23), rnd.choice([0, 0, 0, 30, 15, 45, 59, 10, 5])
     return rnd.choice(["", "", f" at {h}:{mi:02d}", f" at {h}.{mi:02d}", f", {h}:{mi:02d}-{(h+2)%24}:{mi:02d}", f" saat {h}:{mi:02d}'de", f" from {h}:{mi:02d} to {(h+2)%24}:00",
                        f" ({h}:{mi:02d})", f" at {h} pm", f" {h}:{mi:02d} in M1100", f" by {h}.{mi:02d}", f" {h}-{(h+2)%24}", f" @ {h}:{mi:02d}"])
-tail = [" in room NH 304.", " at the BUFAIM Lab (M2142).", " Yer: KB301 ve KB302", " in IE202.", "\nRooms: M1100, M1170, M2171 or M2180", " at NOV 17", " in classroom (ET01)", " Salon: İB102", " in HW12", " at B-12",
+tail = ["\n AÇ – İNCEBOY: M1100\n İPEK – ZELKA: M1170\n", "\nA-K: NH101\nL-Z: NH102", "\nM100: Abak - Çelik\nM1170: Demir - Öz\nM2171: Öztürk - Zorlu", "\nMonday - Friday: NH101\nA - C: NH102",
+        " (Last week I mentioned 1st of December as the possible exam date, but we shifted 1 day)", " — daha önce 3 Aralık demiştim.", " We announced December 5 earlier.",
+        " in room NH 304.", " at the BUFAIM Lab (M2142).", " Yer: KB301 ve KB302", " in IE202.", "\nRooms: M1100, M1170, M2171 or M2180", " at NOV 17", " in classroom (ET01)", " Salon: İB102", " in HW12", " at B-12",
         "", ".", " in M100 and M1170.", " Please be on time.", " (Section 3.2)", " due to the holiday.", " You may bring a calculator.", " See chapter 4.5 for details.",
         " Finally, good luck!", " For example, bring your ID.", " — rooms: NH101, NH102", "\nRegards,\nTA", " instead of the lecture.", " kapsam: bölüm 1-7", " v2.1 uploaded."]
 lead = ["", "Dear all,\n", "Dear Students,\n\n", "Merhaba arkadaşlar,\n", "Please note that ", "IMPORTANT: ", "Gönderen: X\nTarih: 2026-11-10 10:00 Salı\n\n", "Reminder: ", "Hello,\n"]
@@ -84,7 +86,7 @@ for i in range(600):
 subprocess.run(["node", str(HERE / "js_side.js"), str(TMP / "cases.jsonl"), str(int(FROZEN.timestamp() * 1000))], check=True, env={**os.environ, "TZ": "Europe/Istanbul"})
 js = [json.loads(l) for l in (TMP / "cases.jsonl.out").read_text(encoding="utf-8").split("\n")]
 def py(fn, a):
-    if fn == "dates": return [[e["type"], e["date"], e["time"], e["certainty"], bool(e.get("weekday_mismatch")), e["title"], e.get("place")] for e in m.regex_dates(a[0], a[1], a[2], a[3] if len(a) > 3 else "")]
+    if fn == "dates": return [[e["type"], e["date"], e["time"], e["certainty"], bool(e.get("weekday_mismatch")), e["title"], e.get("place"), e.get("seats")] for e in m.regex_dates(a[0], a[1], a[2], a[3] if len(a) > 3 else "")]
     if fn == "gist": return m.gist(a[0])
     if fn == "isExam": return m.is_exam(a[0])
     if fn == "slot": return m.exam_slot(a[0])
