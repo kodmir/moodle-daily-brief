@@ -182,7 +182,7 @@ global.URLScheme = { forRunningScript: () => "scriptable:///run/x" }
 
   // ---- sürüm dosyası
   const vj = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "docs", "version.json"), "utf8"))
-  check("version.json betikle aynı sürümde", [vj.version, A.VERSION], ["1.6.0", "1.6.0"])
+  check("version.json betikle aynı sürümde", vj.version, A.VERSION)
 
   console.log(`\n${pass} geçti, ${fail} başarısız`)
   process.exit(fail ? 1 : 0)

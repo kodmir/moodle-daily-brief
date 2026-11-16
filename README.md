@@ -11,24 +11,45 @@ Runs for free on GitHub Actions, with no server and no laptop needed. Built for 
 works with any Moodle site that has the mobile web service enabled.
 
 ```
-☀️ 7 Kas Cumartesi
+☀️ 16 Kas Pazartesi
 
-🎯 SINAVLAR                                   ← upcoming exams
-• MATH201 Quiz 2 · 8 Kas Paz 10:00 (yarın)
-• IE310 Ara sınav ❔ · 16 Kas Pzt 17:00 (9 gün)
-   ⚠️ tarih değişti (eskisi 11 Kas)            ← a newer announcement moved the exam
+🎯 SINAVLAR                                   ← upcoming exams, with the room when the post names it
+• MATH201 Quiz 2 · 17 Kas Sal 10:00 (yarın)
+• IE310 Ara sınav ❔ · 25 Kas Çar 17:00 · NH101, NH102 (9 gün)
+   ⚠️ tarih değişti (eskisi 20 Kas)            ← a newer announcement moved the exam
 
-📅 BU HAFTA                                   ← this week, grouped by day
-Pazar 8 Kas (yarın)
-  • MATH201 Ders değişikliği — Tomorrow's lecture is cancelled ❔
-Pazartesi 9 Kas (2 gün)
-  • EC204 Ödev — It is due November 9 at 23:59 via Moodle ❔ — 23:59
-Çarşamba 11 Kas (4 gün)
-  • IE310 Homework 3 — 23:59
+📅 BU HAFTA                                   ← this week
+• yarın MATH201 Ders değişikliği — Tomorrow's lecture is cancelled ❔
+• 18 Kas Çar 23:59 EC204 Ödev — It is due November 18 at 23:59 via Moodle ❔
+• 20 Kas Cum 23:59 IE310 Homework 3
 
-📣 YENİ DUYURULAR (4)                         ← full text of new announcements
-...
+📊 NOTLAR                                     ← new grades, with the class average if Moodle shows it
+• EC204 Quiz 1: 82/100 · ort. 67.4
+
+📣 DUYURULAR                                  ← not the text of each post, only the fact that matters
+• IE310 · Midterm Date Updated
+   → Ara sınav 25 Kas Çar 17:00 · NH101, NH102
+• EC204 · Problem Set 4
+   → Ödev 18 Kas Çar 23:59
+• EC204 · Quiz 1 grades
+• MATH201 · Tomorrow's lecture is cancelled
+   → Ders değişikliği yarın
+
+🆕 YENİ İÇERİK
+• IE310 dosya: Lecture 9 slides
+
 ❔ = extracted from announcement text, double-check
+```
+
+And in the evening, only if something is due tonight or tomorrow:
+
+```
+🌙 Yarın · 17 Kas Salı
+• 10:00 MATH201 Quiz 2
+• 17:00 IE202 Ara sınav ❔ · M100, M1170
+
+⏳ Bu gece
+• 23:59 AD216 Homework 4                       ← not shown once it is submitted
 ```
 <sub>Output of `python demo.py` (fictional courses). The brief is in Turkish.</sub>
 
@@ -72,6 +93,8 @@ flowchart LR
 - *"Quiz 2 may be postponed"* is not the 2nd of May, *"Finally, …"* is not a final, *"no class due to the
   holiday"* is not a deadline, and *"at 9.12"* is a time, not 9 December.
 - An assignment called *"Midterm Project Report"* is a deadline, not an exam.
+- *"in M100 and M1170"*, *"at the BUFAIM Lab (M2142)"*, *"Yer: KB301"* are the exam's rooms; *"in IE202"* and
+  *"at NOV 17"* are not.
 - When announcements disagree, the most recently posted one wins, and the brief shows ⚠️ with the old date.
 
 **Never send a wrong brief.** Errors are classified as permanent (a disabled Moodle feature: skip that section),
@@ -94,6 +117,18 @@ moves. The brief compares against the version you last saw and stays quiet when 
 **When Moodle disagrees with itself, say so.** If an assignment closes on the 16th but its own description
 says "due November 15", that is one line with a ⚠️, not two unrelated-looking deadlines. Submitted
 assignments are marked ✓.
+
+**One bad record costs one record.** Each item from Moodle is read on its own: a module, post or calendar entry
+in an unexpected shape (a plugin, an older Moodle) is skipped and logged, and the rest of the brief still goes
+out. In such a run nothing is treated as removed, because what is missing is unknown.
+
+**Two implementations, one behaviour.** The Telegram bot (Python) and the iPhone script (JavaScript) share no
+code. A parity test generates thousands of announcement-like sentences, event sets, course names and grades,
+runs them through both, and fails on any difference. Seeded fuzz tests feed both with hostile text and
+corrupted Moodle responses: a run must end with a brief or a clean "retry later", never a crash, and whatever
+is sent must be valid Telegram HTML within the size limit. (The first run of each found real bugs: a character
+reference like `&#99999999;` in a post crashed the iPhone script, and an over-long line was cut in the middle of
+a `<b>` tag.)
 
 **Scheduling you can trust.** GitHub's built-in cron didn't fire at all on a new repo, so an external
 scheduler triggers the workflow. The script is idempotent (one brief per day, lock file, retries until noon),
@@ -125,19 +160,26 @@ so duplicate or late triggers are harmless.
 **Run locally instead (macOS):** `./install.sh` creates a virtualenv and a `launchd` job (every 30 min, sends
 once per day after `SEND_TIME`). Configuration goes in `.env` (see `.env.example`).
 
+**Evening reminder.** After `REMINDER_TIME` (default 20:00) a second, short message lists tomorrow's exams and
+deadlines and anything still due tonight. Submitted assignments are left out, and if there is nothing to say,
+nothing is sent. Set the repository variable (or `.env` line) `REMINDER_TIME=off` to disable it, or run
+`python moodle_brief.py remind` to ask for it at any time.
+
 ## Try it without any account
 
 ```bash
 pip install -r requirements.txt
 python demo.py      # fake Moodle, prints the brief
-pytest -q           # 111 tests: date parsing, failure modes, grades, de-duplication, no-delete guarantees
+pytest -q                     # 144 tests: date parsing, failure modes, grades, reminders, fuzz
+python tests/parity/run.py    # Python vs. iPhone script on 5,600 generated cases (needs Node)
+for f in tests/ios/*.js; do node "$f"; done    # the iPhone port's own suites
 ```
 
 ## iPhone version
 
 `docs/moodle-brief.js` is a port for [Scriptable](https://scriptable.app): the same parser and rules running
 entirely on the phone, with a morning notification, instant alerts for new announcements and grades, deadline
-reminders that go quiet once an assignment is submitted, and a home-screen widget. Sign-in happens on Moodle's own page (SSO); the token stays in the device keychain.
+reminders that go quiet once an assignment is submitted, a reminder the evening before each exam (with the room), and a home-screen widget. Sign-in happens on Moodle's own page (SSO); the token stays in the device keychain.
 Install page: https://kodmir.github.io/moodle-daily-brief/
 
 ## Optional: Claude mode
@@ -159,10 +201,11 @@ syllabus PDF), and the brief is written by Claude. Without a key the tool is ful
 moodle_brief.py        collection, diffing, date extraction, rendering, Telegram, state
 docs/                  install page (GitHub Pages) + the iPhone/Scriptable port
 docs/version.json      Latest published version; the script checks it once a day (a test keeps it in sync)
-tests/ios/             Node tests for the iPhone port (fake Moodle, fake Scriptable APIs)
+tests/ios/             Node tests for the iPhone port (fake Moodle, fake Scriptable APIs), incl. a fuzz run
+tests/parity/          Python vs. iPhone script: same input, same answer
 demo.py                offline demo with a fake Moodle
 tests/                 pytest suite (frozen clock, fake Moodle and Telegram)
-.github/workflows/     brief.yml (daily run), tests.yml (CI on 3.9 and 3.12)
+.github/workflows/     brief.yml (morning brief + evening reminder), tests.yml (CI: Python 3.9/3.12, Node, parity)
 install.sh             local macOS setup (launchd)
 ```
 

@@ -12,8 +12,8 @@
 // Kayıtlar asla silinmez; eskiyen ya da Moodle'dan kalkan öğeler sadece gösterilmez.
 // ------------------------------------------------------------------------------------------
 
-const VERSION = "1.6.0"
-const RULES = "3"                        // tarih çıkarma kuralları değişince artar: kayıtlı duyurular yeniden taranır
+const VERSION = "1.7.0"
+const RULES = "4"                        // tarih çıkarma kuralları değişince artar: kayıtlı duyurular yeniden taranır
 const DEFAULT_URL = "https://moodle.bogazici.edu.tr"
 const KC_TOKEN = "moodlebrief.token"
 const KC_URL = "moodlebrief.url"
@@ -48,12 +48,31 @@ const fmtTs = ts => { const d = new Date(ts * 1000); return `${ymd(d)} ${hm(d)} 
 const left = n => n === 0 ? "bugün" : n === 1 ? "yarın" : `${n} gün`
 
 // ============================================================ metin yardımcıları
+// Moodle'ın metin düzenleyicisi Türkçe harfleri ve tipografik işaretleri adlı kodlarla yazabiliyor (&ccedil; &rsquo; …)
+const ENTITIES = { nbsp: " ", lt: "<", gt: ">", quot: '"', apos: "'",
+  rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“", sbquo: "‚", bdquo: "„", lsaquo: "‹", rsaquo: "›", laquo: "«", raquo: "»",
+  ndash: "–", mdash: "—", minus: "−", hellip: "…", bull: "•", middot: "·", prime: "′", Prime: "″", dagger: "†", permil: "‰",
+  copy: "©", reg: "®", trade: "™", deg: "°", plusmn: "±", times: "×", divide: "÷", euro: "€", pound: "£", yen: "¥", cent: "¢",
+  sect: "§", para: "¶", micro: "µ", frac12: "½", frac14: "¼", frac34: "¾", sup1: "¹", sup2: "²", sup3: "³", ordm: "º", ordf: "ª",
+  ccedil: "ç", Ccedil: "Ç", ouml: "ö", Ouml: "Ö", uuml: "ü", Uuml: "Ü", gbreve: "ğ", Gbreve: "Ğ", scedil: "ş", Scedil: "Ş",
+  inodot: "ı", imath: "ı", Idot: "İ", acirc: "â", Acirc: "Â", icirc: "î", Icirc: "Î", ucirc: "û", Ucirc: "Û", ecirc: "ê", Ecirc: "Ê",
+  ocirc: "ô", Ocirc: "Ô", aacute: "á", Aacute: "Á", eacute: "é", Eacute: "É", iacute: "í", Iacute: "Í", oacute: "ó", Oacute: "Ó",
+  uacute: "ú", Uacute: "Ú", agrave: "à", Agrave: "À", egrave: "è", Egrave: "È", igrave: "ì", ograve: "ò", ugrave: "ù",
+  auml: "ä", Auml: "Ä", euml: "ë", iuml: "ï", ntilde: "ñ", Ntilde: "Ñ", szlig: "ß", aring: "å", Aring: "Å", oslash: "ø", Oslash: "Ø",
+  aelig: "æ", AElig: "Æ", atilde: "ã", otilde: "õ", yacute: "ý",
+  le: "≤", ge: "≥", ne: "≠", asymp: "≈", equiv: "≡", infin: "∞", sum: "∑", prod: "∏", radic: "√", part: "∂", int: "∫", isin: "∈",
+  cap: "∩", cup: "∪", sub: "⊂", sup: "⊃", and: "∧", or: "∨", not: "¬", forall: "∀", exist: "∃", empty: "∅", nabla: "∇",
+  rarr: "→", larr: "←", harr: "↔", uarr: "↑", darr: "↓", rArr: "⇒", lArr: "⇐", hArr: "⇔",
+  alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ε", theta: "θ", lambda: "λ", mu: "μ", pi: "π", rho: "ρ", sigma: "σ",
+  tau: "τ", phi: "φ", chi: "χ", psi: "ψ", omega: "ω", Delta: "Δ", Sigma: "Σ", Omega: "Ω", Pi: "Π", Phi: "Φ", Theta: "Θ", Lambda: "Λ" }
+// Geçersiz bir sayısal kod (&#99999999;) çalıştırmayı düşürmesin: çözülemeyen kod olduğu gibi kalır
+const codePoint = (n, raw) => (Number.isInteger(n) && n > 0 && n <= 0x10FFFF && !(n >= 0xD800 && n <= 0xDFFF)) ? String.fromCodePoint(n) : raw
 function unescapeHtml(s) {
   return String(s || "")
-    .replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"').replace(/&#0*39;|&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(+n))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&#0*39;/g, "'")
+    .replace(/&#(\d{1,8});/g, (raw, n) => codePoint(+n, raw))
+    .replace(/&#x([0-9a-f]{1,8});/gi, (raw, n) => codePoint(parseInt(n, 16), raw))
+    .replace(/&([A-Za-z][A-Za-z0-9]{1,7});/g, (raw, name) => Object.prototype.hasOwnProperty.call(ENTITIES, name) ? ENTITIES[name] : raw)
     .replace(/&amp;/g, "&")
 }
 function htmlToText(s) {
@@ -79,8 +98,8 @@ function hash(...parts) {   // FNV-1a, iki tohum → 16 hex
 // "2026/2027-1 IE  306.01" -> "IE306"
 function shortCourse(name) {
   const s = unescapeHtml(name).replace(/^\s*\d{4}\/\d{4}-\d\s*/, "")
-  const m = s.match(/([A-Za-zÇĞİÖŞÜçğıöşü]{2,6})\s*(\d{3}[A-Z]?)/)
-  return m ? (m[1].toUpperCase() + m[2]) : s.trim()
+  const m = s.match(/(?<![A-Za-zÇĞİÖŞÜçğıöşü])([A-Za-zÇĞİÖŞÜçğıöşü]{2,6})\s*(\d{3}[A-Z]?)(?![A-Za-z\d])/)
+  return m ? (m[1].toUpperCase() + m[2]) : s.replace(/\s+/g, " ").trim().slice(0, 24)
 }
 const lowerEn = s => String(s || "").replace(/İ/g, "i").toLowerCase()          // MIDTERM -> midterm
 const lowerTr = s => String(s || "").replace(/İ/g, "i").replace(/I/g, "ı").toLowerCase()
@@ -152,14 +171,26 @@ async function quietCall(base, token, fn, params) {
 
 // ============================================================ toplama
 function mk(key, kind, course, title, text = "", t = null, version = null, url = "", file = null, extract = true) {
-  title = unescapeHtml(title || "")
-  return { key, kind, course, title, text, time: t, version: version || hash(title, text), url, file, extract }
+  title = unescapeHtml(typeof title === "string" || typeof title === "number" ? title : "")
+  text = typeof text === "string" ? text : ""             // biçimi bozuk bir kayıt çalıştırmayı düşürmesin
+  t = Number.isFinite(+t) && +t > 0 && +t < 4102444800 ? Math.floor(+t) : null
+  return { key, kind, course, title, text, time: t, version: version || hash(title, text), url: typeof url === "string" ? url : "", file, extract }
 }
 function structEv(course, title, type, ts, source) {
   const d = new Date(ts * 1000)
-  return { course, title, type, date: ymd(d), time: hm(d), certainty: "exact", source }
+  return { course, title: typeof title === "string" ? title : "", type: typeof type === "string" && type ? type : "etkinlik",
+    date: ymd(d), time: hm(d), certainty: "exact", source }
 }
 
+// Hoca açtıysa Moodle'ın verdiği sınıf ortalaması ve sıralama: "ort. 21.5 · sıra 12/85"
+function gradeStats(g) {
+  const out = []
+  const avg = String(typeof g.averageformatted === "string" || typeof g.averageformatted === "number" ? g.averageformatted : "").match(/^\s*(\d+(?:[.,]\d+)?)/)
+  if (avg) out.push("ort. " + parseFloat(Number(avg[1].replace(",", ".")).toFixed(1)))
+  const rank = Math.floor(Number(g.rank)), users = Math.floor(Number(g.numusers))
+  if (rank > 0 && users > 0 && rank <= users) out.push(`sıra ${rank}/${users}`)
+  return out.join(" · ")
+}
 // Not öğesini "85/100" gibi yazar; harf notu ise olduğu gibi bırakır
 function fmtGrade(g) {
   const has = g.gradeformatted !== null && g.gradeformatted !== undefined && g.gradeformatted !== ""
@@ -370,7 +401,8 @@ async function collect(base, token, replyCache) {
       : gradesFromTable(await tryCall(base, token, "gradereport_user_get_grades_table", { courseid: c.id, userid: info.userid }, {}))
     for (const g of rows) {
       const fb = htmlToText(g.feedback)
-      items.push(mk(`grade:${c.id}:${g.id}`, "not", cname[c.id], g.itemname || "Not", fmtGrade(g) + (fb ? "\n" + fb : ""),
+      const stats = gradeStats(g)
+      items.push(mk(`grade:${c.id}:${g.id}`, "not", cname[c.id], g.itemname || "Not", fmtGrade(g) + (stats ? " · " + stats : "") + (fb ? "\n" + fb : ""),
         g.gradedategraded || g.gradedatesubmitted || null, hash(g.graderaw, fb), "", null, false))
     }
   }
@@ -503,7 +535,8 @@ function refine(best, low, s, titleLow, sentenceLow = "") {
   return best
 }
 
-function regexDates(text, posted = null, title = "") {
+const EXAM_TYPES = ["midterm", "final", "quiz", "exam"]
+function regexDates(text, posted = null, title = "", course = "") {
   if (!text) return []
   text = text.split("\n").filter(l => !/^(Gönderen|Tarih|Son teslim|Açılış|Kapanış):/.test(l)).join("\n")
   const low = lowerEn(text), titleLow = lowerEn(title)
@@ -553,6 +586,8 @@ function regexDates(text, posted = null, title = "") {
       found[key] = { title: sentence(text, s, e), type: best || "other", date: ymd(d), time: findTime(text, s, e),
         certainty: "approximate", detail: "metinden" }
       if (wdFlag) found[key].weekday_mismatch = true
+      const place = findPlace(text.slice(a, b), course, EXAM_TYPES.includes(best) ? text : "")
+      if (place) found[key].place = place
     }
   }
   if (posted) {
@@ -578,17 +613,54 @@ function regexDates(text, posted = null, title = "") {
       if (best === null) continue
       if (d < addDays(today, -7) || d > addDays(today, 60)) continue
       const key = `${ymd(d)}:${best}`
-      if (!found[key]) found[key] = { title: sentence(text, s, e), type: best, date: ymd(d), time: findTime(text, s, e),
-        certainty: "approximate", detail: "göreli" }
+      if (!found[key]) {
+        found[key] = { title: sentence(text, s, e), type: best, date: ymd(d), time: findTime(text, s, e),
+          certainty: "approximate", detail: "göreli" }
+        const place = findPlace(text.slice(a, b), course, EXAM_TYPES.includes(best) ? text : "")
+        if (place) found[key].place = place
+      }
     }
   }
   return Object.values(found)
 }
 
+// Sınav yeri: "in M100 and M1170", "Room: NH 304", "at the BUFAIM Lab (M2142)". Oda kodu = 1-4 büyük harf + 2-4 rakam.
+const ROOM = "[A-ZÇĞİÖŞÜ]{1,4} ?-?\\d{2,4}[A-Z]?"
+const RE_ROOM = new RegExp("(?<![A-Za-zÇĞİÖŞÜçğıöşü\\d])" + ROOM + "(?![A-Za-zçğıöşü\\d])", "g")
+const ROOMS = ROOM + "(?:\\s*(?:,|and|ve|veya|or|&|/)\\s*" + ROOM + ")*"
+const PLACE_LABELS = "place|location|venue|yer|salon(?:lar)?|s[ıi]n[ıi]f(?:lar)?|derslik(?:ler)?"
+const RE_PLACE = new RegExp("(?:\\b(?:in|at)\\s+(?:the\\s+)?(?:(?:class|lecture\\s+)?(?:rooms?|halls?)\\s+)?\\(?\\s*" +
+  "|\\b(?:in|at)\\s+[^.,;()\\n]{2,40}?\\(\\s*" +
+  "|\\b(?:class)?rooms?\\s*:?\\s*\\(?\\s*" +
+  "|(?<![A-Za-zÇĞİÖŞÜçğıöşü])(?:" + PLACE_LABELS + ")\\s*:\\s*)(" + ROOMS + ")", "gi")
+const RE_PLACE_LABEL = new RegExp("(?<![A-Za-zÇĞİÖŞÜçğıöşü])(?:(?:class)?rooms?|" + PLACE_LABELS + ")\\s*:\\s*(" + ROOMS + ")", "gi")
+const NOT_ROOMS = new Set(["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "SEPT", "OCT", "NOV", "DEC", "HW", "PS",
+  "CH", "WK", "EX", "MT", "Q", "V", "NO", "OCAK", "MART", "EKİM"])
+function roomsOf(found, course) {
+  const out = []
+  for (const tok of String(found).match(RE_ROOM) || []) {
+    const code = tok.replace(/[ -]/g, "")
+    // dersin kendi kodu ("in IE202") ya da "NOV 17" oda değildir
+    if (code === course || NOT_ROOMS.has(code.match(/^[^\d]+/)[0]) || out.includes(code)) continue
+    out.push(code)
+  }
+  return out.slice(0, 4).join(", ")
+}
+// Tarihin geçtiği cümledeki sınav/etkinlik yeri; cümlede yoksa metindeki etiketli satır ("Rooms: …")
+function findPlace(sentence, course = "", whole = "") {
+  for (const [rx, src] of [[RE_PLACE, sentence], [RE_PLACE_LABEL, whole]]) {
+    for (const m of String(src || "").matchAll(rx)) {
+      const rooms = roomsOf(m[1], course)
+      if (rooms) return rooms
+    }
+  }
+  return ""
+}
+
 function freeExtract(it) {
   if (it.file) return { summary: `Dosya: ${it.file.name}`, importance: "low", events: [] }
   const relOk = ["duyuru", "forum", "duyuru cevabı", "forum cevabı", "mesaj", "bildirim"].includes(it.kind)
-  const events = !["takvim", "not"].includes(it.kind) ? regexDates(it.text || "", relOk ? it.time : null, it.title || "") : []
+  const events = !["takvim", "not"].includes(it.kind) ? regexDates(it.text || "", relOk ? it.time : null, it.title || "", it.course || "") : []
   return { summary: String(it.text || "").replace(/\s+/g, " ").trim().slice(0, 160), events }
 }
 
@@ -673,7 +745,11 @@ function mergedEvents(struct, docEvents, asOf) {
     const typ = e.type || "other"
     if (typ === "other") continue
     const sl = examSlot(e)
-    if (sl && exactSlots.has(e.course + "|" + sl)) continue
+    if (sl && exactSlots.has(e.course + "|" + sl)) {
+      // Moodle'ın kendi kaydı daha güvenilir; ama yer bilgisi sadece duyuruda yazar, o kayda taşınır
+      if (e.place) for (const o of out) if (o.certainty === "exact" && o.course === e.course && exactSlot(o) === sl && !o.place) o.place = e.place
+      continue
+    }
     const day = shownDay(e), item = String(e.item || ""), notif = item.startsWith("notif:")
     if (["assignment", "project"].includes(typ) && /^(assign|mod|cal):/.test(item)) {
       // Tarih, bir ödevin KENDİ açıklamasından geliyor. Moodle'daki teslim tarihiyle aynıysa tekrardır; birkaç gün
@@ -691,7 +767,7 @@ function mergedEvents(struct, docEvents, asOf) {
     }
     // aynı şey mi? Tek istisna: bir teslimle aynı güne düşen, SAATİ FARKLI itiraz oturumu / ders değişikliği ayrı
     // bir olaydır (saatler aynıysa Moodle kaydı zaten o oturumdur: randevu modülü)
-    if (out.some(o => {
+    const same = out.find(o => {
       if (o.course !== e.course && !notif) return false
       if (shownDay(o) !== day) return false
       const exact = o.certainty === "exact"
@@ -699,7 +775,8 @@ function mergedEvents(struct, docEvents, asOf) {
         (notif && isExam(o) === isExam(e)) ||
         (exact && !isExam(o) && !isExam(e) && !(["review", "class_change"].includes(typ) &&
           !CALENDAR_TYPES.has((o.type || "").toLowerCase()) && o.time && e.time && o.time !== e.time))
-    })) continue
+    })
+    if (same) { if (e.place && !same.place) same.place = e.place; continue }
     out.push({ ...e })
   }
   for (const e of out) {
@@ -778,8 +855,9 @@ function archiveVersionText(key, version) {   // bir öğenin arşivdeki belirli
 // bu bir güncelleme değildir.
 const RE_DATE_LABEL = /^[^\n]{1,60}?: (\d{4}-\d\d-\d\d \d\d:\d\d) \S+$/gm
 const normText = t => String(t || "").replace(RE_DATE_LABEL, "$1").trim()
+// Eski kayıt, betiğin önceki sürümünün çözemediği kodları (&rsquo;) ham hâliyle tutuyor olabilir: önce çözülür
 const sameContent = (oldTitle, oldText, title, text) => typeof oldText === "string" &&
-  unescapeHtml(oldTitle || "") === (title || "") && normText(oldText) === normText(text)
+  unescapeHtml(oldTitle || "") === (title || "") && normText(unescapeHtml(oldText)) === normText(unescapeHtml(text))
 
 // Moodle'dan gelen veriyi kayıtlara işle; yeni duyuruları ve notları döndür
 function ingest(st, data) {
@@ -899,7 +977,7 @@ function annFacts(events, asOf, limit = 3) {
   const out = []
   for (const r of rows) {
     const typ = r.e.type || "other"
-    const fact = TYPE_LABEL[typ] ? `${TYPE_LABEL[typ]} ${whenTxt(r.d, r.t, r.n)}` : cut(String(r.e.title || "").trim(), 90)
+    const fact = TYPE_LABEL[typ] ? `${TYPE_LABEL[typ]} ${whenTxt(r.d, r.t, r.n)}${r.e.place ? " · " + r.e.place : ""}` : cut(String(r.e.title || "").trim(), 90)
     if (fact && !out.includes(fact)) out.push(fact)
   }
   return out.slice(0, limit)
@@ -955,7 +1033,11 @@ function filterOther(other, shown, asOf) {
       const ds = String(n.text || "").slice(0, 10)
       if (/^\d{4}-\d{2}-\d{2}$/.test(ds) && daysBetween(asOf, ds) <= 7) return false
     }
-    if (n.kind === "bildirim") { const low = String(n.title || "").toLowerCase(); if (titles.some(t => low.includes(t))) return false }
+    if (n.kind === "bildirim") {
+      const low = String(n.title || "").toLowerCase()
+      if (titles.some(t => low.includes(t))) return false
+      if (/(content change|içerik değişikliği)\s*$/.test(low)) return false   // neyin değiştiğini zaten bu özet söylüyor
+    }
     return true
   })
 }
@@ -1026,8 +1108,13 @@ function cutLabel(s, n) {
   const m = s.match(/^(.*\S)(\s\([^()]{1,12}\))$/)
   return m && s.length > n ? cut(m[1], n - m[2].length) + m[2] : cut(s, n)
 }
+// " · M100, M1170" — satırda zaten yazıyorsa (kısa duyuru cümlesi etiketin içindeyse) tekrarlanmaz
+function placeOf(e) {
+  const rooms = String(e.place || "").split(", ").filter(Boolean), lab = label(e).replace(/(?<=[A-ZÇĞİÖŞÜ])[ -](?=\d)/g, "")
+  return rooms.length && !rooms.every(r => lab.includes(r)) ? " · " + rooms.join(", ") : ""
+}
 const evLine = (e, withDate = true) =>
-  `${e.course} ${label(e)}${mark(e)}${withDate ? ` · ${trDate(e._d)}` : ""}${e._t ? " " + e._t : ""}${withDate ? ` (${left(e._n)})` : ""}`
+  `${e.course} ${label(e)}${mark(e)}${withDate ? ` · ${trDate(e._d)}` : ""}${e._t ? " " + e._t : ""}${placeOf(e)}${withDate ? ` (${left(e._n)})` : ""}`
 
 // Bildirim metni (kısa)
 function notificationText(m) {
@@ -1039,7 +1126,7 @@ function notificationText(m) {
     : live.length ? "📌 Bugünkü teslimler tamam ✓" : "")
   if (m.exams.length) {
     const e = m.exams[0]
-    lines.push(`🎯 ${e.course} ${label(e)} · ${trDate(e._d)} (${left(e._n)})${e.changed_from ? " ⚠️ tarih değişti" : ""}`)
+    lines.push(`🎯 ${e.course} ${label(e)} · ${trDate(e._d)}${e._n <= 1 ? placeOf(e) : ""} (${left(e._n)})${e.changed_from ? " ⚠️ tarih değişti" : ""}`)
   }
   const wk = m.week.filter(e => !e.done)
   if (wk.length) lines.push(`📅 Bu hafta ${wk.length} teslim/etkinlik`)
@@ -1059,6 +1146,7 @@ function briefHtml(m) {
   const li = arr => arr.length ? `<ul>${arr.join("")}</ul>` : ""
   const evLi = (e, withDate) => `<li><b>${esc(e.course)}</b> ${esc(label(e))}${mark(e)}` +
     `${withDate ? ` <span class=d>· ${esc(trDate(e._d))}${e._t ? " " + e._t : ""} (${left(e._n)})</span>` : (e._t ? ` <span class=d>${e._t}</span>` : "")}` +
+    `${placeOf(e) ? ` <span class=d>${esc(placeOf(e))}</span>` : ""}` +
     `${e.done ? ` <span class=ok>✓ teslim edildi</span>` : ""}${e._past && !e.done ? ` <span class=d>(saati geçti)</span>` : ""}` +
     `${e.certainty === "approximate" && e.url ? ` <a class=src href="${esc(e.url)}">duyuru ›</a>` : ""}` +
     `${e.certainty === "approximate" && (e.title || "").length > 45 ? `<div class=q>“${esc(e.title)}”</div>` : ""}` +
@@ -1082,7 +1170,8 @@ function briefHtml(m) {
   }).join("") + (m.ann.length > 12 ? `<div class=empty>… ve ${m.ann.length - 12} duyuru daha</div>` : "")
   const gradeHtml = li(m.grades.slice(0, 15).map(g => {
     const lines = String(g.text || "").split("\n"), fb = lines.slice(1).join(" ").replace(/\s+/g, " ").trim()
-    return `<li><b>${esc(g.course)}</b> ${esc((g.title || "").slice(0, 60))}: <b>${esc(lines[0])}</b>${g.updated ? " <i>(değişti)</i>" : ""}` +
+    const [val, ...stats] = lines[0].split(" · ")      // "28/40 · ort. 21.5": not kalın, sınıf ortalaması yalın
+    return `<li><b>${esc(g.course)}</b> ${esc((g.title || "").slice(0, 60))}: <b>${esc(val)}</b>${stats.length ? ` <span class=d>· ${esc(stats.join(" · "))}</span>` : ""}${g.updated ? " <i>(değişti)</i>" : ""}` +
       `${fb ? `<div class=d>${esc(cut(fb, 100))}</div>` : ""}</li>`
   }))
   const otherHtml = li(groupOther(m.other).map(g => `<li>${g.course ? `<b>${esc(g.course)}</b> ` : ""}${esc(g.text)}</li>`))
@@ -1175,6 +1264,29 @@ async function scheduleReminders(st, evs) {
       // zaman başlıkta (kesilmez), işin tam adı gövdede; görüşme/etkinlik için "son" denmez
       n.title = `⏰ ${e.course} · ${dn <= 0 ? "Bugün" : dn === 1 ? "Yarın" : trDate(e._d)} ${e._t}${kind === "due" ? " son" : ""}`
       n.body = e.title
+      n.openURL = URLScheme.forRunningScript() + "?view=brief"
+      n.setTriggerDate(at)
+      await n.schedule()
+      keep[id] = { at: at.getTime() }
+    }
+  }
+  // Sınavdan önceki akşam (20:00): duyurudan çıkarılmış sınavlar için de, yeriyle birlikte
+  if (st.settings.deadlineReminders !== false) {
+    for (const e of evs) {
+      if (!isExam(e) || e._past || /açılış/.test(e.title || "") || /açılış/.test(e.type || "")) continue
+      const d0 = fromYmd(ymd(e._d)), eve = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() - 1, 20, 0)
+      const [hh, mm] = (e._t || "23:59").split(":").map(Number)
+      const start = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate(), hh, mm)
+      if (start.getTime() - nowMs <= 3600 * 1000 || eve.getTime() - nowMs > 48 * 3600 * 1000) continue
+      const id = NOTIF_DUE + "exam." + hash(e.course, examSlot(e) || exactSlot(e) || "", ymd(e._d))
+      if (old[id] && old[id].at <= nowMs) { keep[id] = old[id]; continue }      // zaten çaldı
+      const at = eve.getTime() > nowMs ? eve : new Date(nowMs + 60 * 1000)      // akşamı kaçırdıysak hemen
+      const dn = daysBetween(at, ymd(e._d))
+      const n = new Notification()
+      n.identifier = id
+      n.threadIdentifier = "moodlebrief"
+      n.title = `🎯 ${e.course} ${TYPE_LABEL[e.type] || "Sınav"} · ${dn <= 0 ? "Bugün" : "Yarın"}${e._t ? " " + e._t : ""}`
+      n.body = [e.place ? "Yer: " + e.place : "", e.certainty === "approximate" ? "Duyurudan çıkarıldı, teyit et." : e.title].filter(Boolean).join(" · ")
       n.openURL = URLScheme.forRunningScript() + "?view=brief"
       n.setTriggerDate(at)
       await n.schedule()
@@ -1487,7 +1599,7 @@ async function settings(st, base) {
 // Testler bu dosyayı __TEST__ ile yükler ve iç fonksiyonları alır
 if (typeof __TEST__ !== "undefined") {
   __EXPORTS__.api = { regexDates, freeExtract, supersede, mergedEvents, buildModel, ingest, notificationText, briefHtml,
-    shortCourse, examSlot, isExam, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setGet: f => { httpGet = f }, setFm: f => { fm = f },
+    shortCourse, examSlot, isExam, findPlace, gradeStats, collect, setNow: f => { nowFn = f }, setPost: f => { httpPost = f }, setGet: f => { httpGet = f }, setFm: f => { fm = f },
     loadState, saveState, nextSendDate, reminderTime, scheduleReminders, instantNotify, remKind, stripHello, checkUpdate, cmpVer, settings, VERSION, annFacts, isStale, gist, addsToTitle, filterOther, groupOther, widget, WARNINGS, htmlToText, unescapeHtml, diffSummary, dedupeNews, fmtGrade, kindTr, gradesFromTable }
 } else {
   await main()

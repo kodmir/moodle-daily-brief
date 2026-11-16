@@ -87,7 +87,7 @@ MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "40000"))
 LOOKAHEAD_DAYS = int(os.getenv("LOOKAHEAD_DAYS", "45"))
 # API key yoksa ücretsiz mod: Claude kullanılmaz, tarihler metinden kurallarla çıkarılır
 FREE_MODE = not ANTHROPIC_API_KEY
-MODE = "free7" if FREE_MODE else "claude"  # kurallar değişince artar: kayıtlı öğeler yeniden taranır
+MODE = "free8" if FREE_MODE else "claude"  # kurallar değişince artar: kayıtlı öğeler yeniden taranır
 
 
 def _id_list(name: str) -> List[int]:
@@ -117,8 +117,50 @@ def h(*parts: Any) -> str:
     return hashlib.sha1("||".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:16]
 
 
+def _num(x: Any) -> int:
+    """Moodle'dan gelen zaman damgası / sayı. Sayı değilse ya da akıl dışıysa 0 (bozuk kayıt çökertmesin)."""
+    if isinstance(x, bool):
+        return 0
+    try:
+        v = int(float(x))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return v if 0 < v < 4102444800 else 0  # 2100 yılından sonrası zaman damgası değildir
+
+
+def _str(x: Any) -> str:
+    """Metin alanı: metin değilse boş (sayıysa yazıya çevrilir)."""
+    if isinstance(x, str):
+        return x
+    return str(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and x == x else ""
+
+
+def _dict(x: Any) -> Dict[str, Any]:
+    return x if isinstance(x, dict) else {}
+
+
+def _dicts(x: Any) -> List[Dict[str, Any]]:
+    return [d for d in x if isinstance(d, dict)] if isinstance(x, list) else []
+
+
+SKIPPED: List[str] = []  # bu çalıştırmada biçimi bozuk olduğu için atlanan kayıt türleri
+
+
+def _guard(what: str, fn: Any, *args: Any) -> None:
+    """Tek bir kaydı işler. Beklenmeyen biçimde bir kayıt (eklenti, eski Moodle sürümü) bütün brifingi
+    düşürmesin: o kayıt atlanır, loga yazılır, gerisi okunur. İnternet/token hataları yukarı çıkar."""
+    try:
+        fn(*args)
+    except (TransientError, TokenError):
+        raise
+    except Exception as e:
+        if what not in SKIPPED:
+            log(f"UYARI biçimi beklenmeyen bir {what} kaydı atlandı ({type(e).__name__}: {str(e)[:80]})")
+        SKIPPED.append(what)
+
+
 def html_to_text(s: Optional[str]) -> str:
-    if not s:
+    if not s or not isinstance(s, str):
         return ""
     s = re.sub(r"(?is)<(script|style).*?</\1>", " ", s)
     s = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</li>|</h\d>|</tr>", "\n", s)
@@ -131,14 +173,14 @@ def html_to_text(s: Optional[str]) -> str:
 
 def short_course(c: Dict[str, Any]) -> str:
     """'2026/2027-1 IE  306.01' -> 'IE306'"""
-    s = html.unescape(c.get("shortname") or c.get("fullname") or str(c.get("id")))
+    s = html.unescape(_str(c.get("shortname")) or _str(c.get("fullname")) or str(c.get("id")))
     s = re.sub(r"^\s*\d{4}/\d{4}-\d\s*", "", s)
-    m = re.match(r"([A-Za-zÇĞİÖŞÜçğıöşü]{2,6})\s*(\d{3}[A-Z]?)", s)
-    return f"{m.group(1).upper()}{m.group(2)}" if m else s.strip()
+    m = re.search(r"(?<![A-Za-zÇĞİÖŞÜçğıöşü])([A-Za-zÇĞİÖŞÜçğıöşü]{2,6})\s*(\d{3}[A-Z]?)(?![A-Za-z\d])", s)
+    return f"{m.group(1).upper()}{m.group(2)}" if m else re.sub(r"\s+", " ", s).strip()[:24]
 
 
 def fmt_ts(ts: int) -> str:
-    dt = datetime.fromtimestamp(ts, TZ)
+    dt = datetime.fromtimestamp(_num(ts), TZ)
     return f"{dt:%Y-%m-%d %H:%M} {GUN[dt.weekday()]}"
 
 
@@ -266,7 +308,7 @@ class Moodle:
         else:
             raise TransientError(f"{fn}: {last}")
         if isinstance(j, dict) and j.get("exception"):
-            code = (j.get("errorcode") or "").lower()
+            code = _str(j.get("errorcode")).lower()
             if code in TOKEN_CODES and fn in ("core_webservice_get_site_info", "core_enrol_get_users_courses"):
                 raise TokenError(f"{code} — {j.get('message')}")
             raise MoodleError(f"{fn}: {code} — {j.get('message')}")
@@ -363,13 +405,16 @@ DATE_IDS = {"duedate": "teslim", "timeclose": "kapanış", "timeopen": "açılı
 def mk(key: str, kind: str, course: str, title: str, text: str = "", t: Optional[int] = None,
        version: Optional[str] = None, url: str = "", file: Optional[Dict[str, Any]] = None,
        extract: bool = True) -> Dict[str, Any]:
-    title = html.unescape(title or "")  # Moodle adları "&amp;" gibi kodlu gelebiliyor
+    title = html.unescape(_str(title))  # Moodle adları "&amp;" gibi kodlu gelebiliyor
+    text = _str(text)
+    t = _num(t) or None
     return {"key": key, "kind": kind, "course": course, "title": title, "text": text, "time": t,
             "version": version or h(title, text), "url": url, "file": file, "extract": extract}
 
 
 def struct_ev(course: str, title: str, typ: str, ts: int, source: str) -> Dict[str, Any]:
-    dt = datetime.fromtimestamp(ts, TZ)
+    dt = datetime.fromtimestamp(_num(ts), TZ)
+    title, typ = _str(title), _str(typ) or "etkinlik"
     return {"course": course, "title": title, "type": typ, "date": dt.strftime("%Y-%m-%d"),
             "time": dt.strftime("%H:%M"), "certainty": "exact", "source": source}
 
@@ -388,13 +433,13 @@ def _replies(m: "Moodle", d: Dict[str, Any], did: Any, tm: Any, kind: str, cn: s
             return cached["items"]
         return []
     out = []
-    for p in pr.get("posts", []):
+    for p in _dicts(_dict(pr).get("posts")):
         if p.get("parentid") in (0, None) or p.get("id") == d.get("id"):
             continue  # ilk mesaj zaten ayrıca alındı
         ptxt = html_to_text(p.get("message"))
         if not ptxt:
             continue
-        who = (p.get("author") or {}).get("fullname") or p.get("userfullname") or "?"
+        who = _str(_dict(p.get("author")).get("fullname")) or _str(p.get("userfullname")) or "?"
         pt = p.get("timecreated") or p.get("created") or tm
         out.append(mk(f"reply:{p.get('id')}", f"{kind} cevabı", cn, f"Re: {subj}",
                       f"Gönderen: {who}\nTarih: {fmt_ts(pt)}\n\n{ptxt}", t=pt,
@@ -410,29 +455,46 @@ def _submitted(m: "Moodle", assign_id: Any) -> bool:
         sub = m.call("mod_assign_get_submission_status", assignid=assign_id)
     except MoodleError:
         return False
-    la = (sub.get("lastattempt") if isinstance(sub, dict) else None) or {}
-    stt = (la.get("submission") or {}).get("status") or (la.get("teamsubmission") or {}).get("status")
+    la = _dict(_dict(sub).get("lastattempt"))
+    stt = _dict(la.get("submission")).get("status") or _dict(la.get("teamsubmission")).get("status")
     return stt == "submitted"
+
+
+def grade_stats(g: Dict[str, Any]) -> str:
+    """Hoca açtıysa Moodle'ın verdiği sınıf ortalaması ve sıralama: 'ort. 21.5 · sıra 12/85'."""
+    out = []
+    avg = re.match(r"\s*(\d+(?:[.,]\d+)?)", _str(g.get("averageformatted")))
+    if avg:
+        out.append(f"ort. {round(float(avg.group(1).replace(',', '.')), 1):g}")
+    rank, users = _num(g.get("rank")), _num(g.get("numusers"))
+    if rank and users and rank <= users:
+        out.append(f"sıra {rank}/{users}")
+    return " · ".join(out)
 
 
 def fmt_grade(g: Dict[str, Any]) -> str:
     """Not öğesini '85/100' gibi yazar; harf notu / yüzde ise olduğu gibi bırakır."""
     val = str(g.get("gradeformatted") if g.get("gradeformatted") not in (None, "") else g.get("graderaw")).strip()
     try:
-        num = f"{float(val.replace(',', '.')):g}"
-    except ValueError:
+        num = f"{round(float(val.replace(',', '.')), 2):g}"
+    except (ValueError, OverflowError):
         return val
-    mx = g.get("grademax")
-    return f"{num}/{float(mx):g}" if isinstance(mx, (int, float)) and mx else num
+    if num in ("nan", "inf", "-inf"):
+        return val
+    try:
+        mx = float(str(g.get("grademax")).replace(",", "."))
+    except ValueError:
+        mx = 0.0
+    return f"{num}/{round(mx, 2):g}" if mx and mx == mx and not isinstance(g.get("grademax"), bool) else num
 
 
 def grades_from_table(res: Any) -> List[Dict[str, Any]]:
     """gradereport_user_get_grades_table çıktısını (HTML hücreleri) not kalemlerine çevirir.
     Kategori ve toplam satırları atlanır; notu girilmemiş kalemler ('-') atlanır."""
     out: List[Dict[str, Any]] = []
-    for tb in (res.get("tables") or []) if isinstance(res, dict) else []:
-        for row in tb.get("tabledata") or []:
-            if not isinstance(row, dict) or not isinstance(row.get("itemname"), dict):
+    for tb in _dicts(_dict(res).get("tables")):
+        for row in _dicts(tb.get("tabledata")):
+            if not isinstance(row.get("itemname"), dict):
                 continue
             cell = row["itemname"]
             cls = str(cell.get("class") or "")
@@ -457,14 +519,14 @@ def active_courses(m: Moodle, userid: int) -> List[Dict[str, Any]]:
     courses = m.call("core_enrol_get_users_courses", userid=userid)
     now = int(time.time())
     out = []
-    for c in courses:
-        if c["id"] in EXCLUDE_COURSE_IDS:
+    for c in _dicts(courses):
+        if not isinstance(c.get("id"), int) or c["id"] in EXCLUDE_COURSE_IDS:
             continue
         if COURSE_IDS:
             if c["id"] in COURSE_IDS:
                 out.append(c)
             continue
-        start, end = c.get("startdate") or 0, c.get("enddate") or 0
+        start, end = _num(c.get("startdate")), _num(c.get("enddate"))
         if end:
             ok = end > now - 14 * 86400 and start < now + 30 * 86400
         else:
@@ -477,189 +539,222 @@ def active_courses(m: Moodle, userid: int) -> List[Dict[str, Any]]:
 def collect(m: Moodle, reply_cache: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     reply_cache = reply_cache or {}
     new_cache: Dict[str, Any] = {}
+    del SKIPPED[:]
     info = m.call("core_webservice_get_site_info")
-    userid = info["userid"]
+    userid = _dict(info).get("userid")
+    if not userid:
+        raise TransientError("Moodle kullanıcı bilgisini vermedi (bakımda olabilir)")
     courses = active_courses(m, userid)
     cname = {c["id"]: short_course(c) for c in courses}
     cids = list(cname)
     now = int(time.time())
     items: List[Dict[str, Any]] = []
     struct: List[Dict[str, Any]] = []
-    capped = False
+    capped = [False]
     log(f"{len(courses)} ders taranıyor: {', '.join(cname.values())}")
 
     # 1) Ders içerikleri: bölümler, etkinlikler, dosyalar, sayfalar
-    for c in courses:
-        cn = cname[c["id"]]
-        for s in m.try_call("core_course_get_contents", default=[], courseid=c["id"]) or []:
-            summ = html_to_text(s.get("summary"))
-            if summ:
-                items.append(mk(f"section:{c['id']}:{s.get('id')}", "bölüm", cn,
-                                s.get("name") or "Bölüm açıklaması", summ))
-            for mod in s.get("modules", []):
-                if mod.get("uservisible") is False:
+    def module(c: Dict[str, Any], cn: str, mod: Dict[str, Any]) -> None:
+        if mod.get("uservisible") is False:
+            return
+        cmid, modname, name = mod.get("id"), _str(mod.get("modname")), _str(mod.get("name"))
+        desc = html_to_text(mod.get("description"))
+        mdates = [d for d in _dicts(mod.get("dates")) if _num(d.get("timestamp"))]
+        contents = _dicts(mod.get("contents"))
+        dates = [f"{d.get('label')}: {fmt_ts(d['timestamp'])}" for d in mdates]
+        urls = [_str(x.get("fileurl")) for x in contents if x.get("type") == "url"]
+        text = "\n".join(filter(None, [desc, "\n".join(dates), "\n".join(urls)]))
+        items.append(mk(f"mod:{cmid}", f"etkinlik ({modname})", cn, name, text,
+                        url=_str(mod.get("url")), extract=bool(desc or dates)))
+        for d in mdates:
+            if _num(d["timestamp"]) > now - 86400:
+                lab = _str(d.get("label")).strip(" :").lower()
+                lab = {"due": "teslim", "closes": "kapanış", "opens": "açılış", "closed": "kapanış",
+                       "opened": "açılış"}.get(lab, lab)
+                # Etiket Moodle'ın arayüz diline göre değişir ("Due:" / "Son teslim:"); 'dataid' değişmez
+                lab = DATE_IDS.get(_str(d.get("dataid")).lower(), lab)
+                if lab == "açılış" and modname != "quiz":
+                    continue  # anket/ödev açılışları gürültü; kapanış ve teslim önemli
+                if lab in ("cut-off date", "remind me to grade by", "kesme tarihi"):
                     continue
-                cmid, modname, name = mod.get("id"), mod.get("modname", ""), mod.get("name", "")
-                desc = html_to_text(mod.get("description"))
-                dates = [f"{d.get('label')}: {fmt_ts(d['timestamp'])}" for d in mod.get("dates") or []
-                         if d.get("timestamp")]
-                urls = [x.get("fileurl", "") for x in mod.get("contents") or [] if x.get("type") == "url"]
-                text = "\n".join(filter(None, [desc, "\n".join(dates), "\n".join(urls)]))
-                items.append(mk(f"mod:{cmid}", f"etkinlik ({modname})", cn, name, text,
-                                url=mod.get("url", ""), extract=bool(desc or dates)))
-                for d in mod.get("dates") or []:
-                    if d.get("timestamp") and d["timestamp"] > now - 86400:
-                        lab = (d.get("label") or "").strip(" :").lower()
-                        lab = {"due": "teslim", "closes": "kapanış", "opens": "açılış", "closed": "kapanış",
-                               "opened": "açılış"}.get(lab, lab)
-                        # Etiket Moodle'ın arayüz diline göre değişir ("Due:" / "Son teslim:"); 'dataid' değişmez
-                        lab = DATE_IDS.get(str(d.get("dataid") or "").lower(), lab)
-                        if lab == "açılış" and modname != "quiz":
-                            continue  # anket/ödev açılışları gürültü; kapanış ve teslim önemli
-                        if lab in ("cut-off date", "remind me to grade by", "kesme tarihi"):
-                            continue
-                        title = f"{name} ({lab})" if lab and lab != "teslim" else name
-                        struct.append(struct_ev(cn, title, modname, d["timestamp"], "moodle"))
-                for f in mod.get("contents") or []:
-                    if f.get("type") != "file":
-                        continue
-                    fname = f.get("filename", "")
-                    tm = f.get("timemodified") or f.get("timecreated")
-                    kind = "sayfa" if modname == "page" else "dosya"
-                    items.append(mk(f"file:{cmid}:{f.get('filepath', '/')}{fname}", kind, cn,
-                                    name if modname == "page" else f"{name} / {fname}", t=tm,
-                                    version=f"{tm}:{f.get('filesize')}", url=mod.get("url", ""),
-                                    file={"url": f.get("fileurl"), "name": fname, "size": f.get("filesize") or 0}))
+                title = f"{name} ({lab})" if lab and lab != "teslim" else name
+                struct.append(struct_ev(cn, title, modname, d["timestamp"], "moodle"))
+        for f in contents:
+            if f.get("type") != "file":
+                continue
+            fname = _str(f.get("filename"))
+            tm = f.get("timemodified") or f.get("timecreated")
+            kind = "sayfa" if modname == "page" else "dosya"
+            items.append(mk(f"file:{cmid}:{_str(f.get('filepath')) or '/'}{fname}", kind, cn,
+                            name if modname == "page" else f"{name} / {fname}", t=tm,
+                            version=f"{tm}:{f.get('filesize')}", url=_str(mod.get("url")),
+                            file={"url": f.get("fileurl"), "name": fname, "size": _num(f.get("filesize"))}))
+
+    def section(c: Dict[str, Any], cn: str, s: Dict[str, Any]) -> None:
+        summ = html_to_text(s.get("summary"))
+        if summ:
+            items.append(mk(f"section:{c['id']}:{s.get('id')}", "bölüm", cn,
+                            _str(s.get("name")) or "Bölüm açıklaması", summ))
+        for mod in _dicts(s.get("modules")):
+            _guard("etkinlik", module, c, cn, mod)
+
+    for c in courses:
+        for s in _dicts(m.try_call("core_course_get_contents", default=[], courseid=c["id"])):
+            _guard("bölüm", section, c, cname[c["id"]], s)
 
     # 2) Forumlar ve duyurular
-    forums = m.try_call("mod_forum_get_forums_by_courses", default=[], courseids=cids) or []
-    for fo in forums:
+    def discussion(d: Dict[str, Any], kind: str, cn: str, done_ids: set) -> None:
+        did = d.get("discussion") or d.get("id")
+        if did in done_ids:
+            return  # sayfalar arasında kayan (sabitlenmiş) tartışma
+        done_ids.add(did)
+        tm = d.get("modified") or d.get("timemodified") or d.get("created")
+        subj = (_str(d.get("subject")) or _str(d.get("name")) or "(konu yok)").strip()
+        body = html_to_text(d.get("message"))
+        atts = _dicts(d.get("attachments"))
+        att_names = ", ".join(_str(a.get("filename")) for a in atts)
+        text = f"Gönderen: {d.get('userfullname', '?')}\nTarih: {fmt_ts(d.get('created') or tm)}\n\n{body}"
+        if att_names:
+            text += f"\n\nEkler: {att_names}"
+        # sürüm metnin kendisini de içerir: hoca duyuruyu düzenleyip tarihi değiştirirse yakalanır
+        ver = h(tm, subj, body)
+        items.append(mk(f"disc:{did}", kind, cn, subj, text, t=d.get("created") or tm, version=ver,
+                        url=f"{MOODLE_URL}/mod/forum/discuss.php?d={did}"))
+        # cevaplar ("düzeltme: sınıf değişti" gibi) ayrı öğe olarak okunur.
+        # Tartışma değişmediyse önceki çalıştırmanın sonucu kullanılır (her sabah yüzlerce istek atmamak için)
+        if _num(d.get("numreplies")) > 0:
+            items.extend(_replies(m, d, did, tm, kind, cn, subj, reply_cache, new_cache))
+        for a in atts:
+            fn = _str(a.get("filename"))
+            if a.get("fileurl"):
+                items.append(mk(f"att:{did}:{fn}", f"{kind} eki", cn, f"{subj} / {fn}", t=tm,
+                                version=f"{a.get('timemodified', tm)}:{a.get('filesize')}",
+                                file={"url": a["fileurl"], "name": fn, "size": _num(a.get("filesize"))}))
+
+    def forum(fo: Dict[str, Any]) -> None:
         cn = cname.get(fo.get("course"), "?")
         kind = "duyuru" if fo.get("type") == "news" else "forum"
-        discs, done_ids = [], set()
+        discs: List[Dict[str, Any]] = []
+        done_ids: set = set()
         for page in range(FORUM_PAGES):
-            res = m.try_call("mod_forum_get_forum_discussions", default=None, forumid=fo["id"], page=page,
+            res = m.try_call("mod_forum_get_forum_discussions", default=None, forumid=fo.get("id"), page=page,
                              perpage=FORUM_PAGE)
             if res is None:
-                res = m.try_call("mod_forum_get_forum_discussions_paginated", default={}, forumid=fo["id"],
+                res = m.try_call("mod_forum_get_forum_discussions_paginated", default={}, forumid=fo.get("id"),
                                  sortby="timemodified", sortdirection="DESC", page=page, perpage=FORUM_PAGE)
-            batch = (res or {}).get("discussions", [])
+            batch = _dict(res).get("discussions")
+            batch = batch if isinstance(batch, list) else []
             discs.extend(batch)
             if len(batch) < FORUM_PAGE:
                 break
         else:
-            capped = True  # forumun tamamı okunamadı: görünmeyen eski tartışmalar 'kaldırıldı' sayılmaz
-        for d in discs:
-            did = d.get("discussion") or d.get("id")
-            if did in done_ids:
-                continue  # sayfalar arasında kayan (sabitlenmiş) tartışma
-            done_ids.add(did)
-            tm = d.get("modified") or d.get("timemodified") or d.get("created")
-            subj = (d.get("subject") or d.get("name") or "(konu yok)").strip()
-            body = html_to_text(d.get("message"))
-            atts = d.get("attachments") if isinstance(d.get("attachments"), list) else []
-            att_names = ", ".join(a.get("filename", "") for a in atts)
-            text = f"Gönderen: {d.get('userfullname', '?')}\nTarih: {fmt_ts(d.get('created') or tm)}\n\n{body}"
-            if att_names:
-                text += f"\n\nEkler: {att_names}"
-            # sürüm metnin kendisini de içerir: hoca duyuruyu düzenleyip tarihi değiştirirse yakalanır
-            ver = h(tm, subj, body)
-            items.append(mk(f"disc:{did}", kind, cn, subj, text, t=d.get("created") or tm, version=ver,
-                            url=f"{MOODLE_URL}/mod/forum/discuss.php?d={did}"))
-            # cevaplar ("düzeltme: sınıf değişti" gibi) ayrı öğe olarak okunur.
-            # Tartışma değişmediyse önceki çalıştırmanın sonucu kullanılır (her sabah yüzlerce istek atmamak için)
-            if (d.get("numreplies") or 0) > 0:
-                items.extend(_replies(m, d, did, tm, kind, cn, subj, reply_cache, new_cache))
-            for a in atts:
-                fn = a.get("filename", "")
-                if a.get("fileurl"):
-                    items.append(mk(f"att:{did}:{fn}", f"{kind} eki", cn, f"{subj} / {fn}", t=tm,
-                                    version=f"{a.get('timemodified', tm)}:{a.get('filesize')}",
-                                    file={"url": a["fileurl"], "name": fn, "size": a.get("filesize") or 0}))
+            capped[0] = True  # forumun tamamı okunamadı: görünmeyen eski tartışmalar 'kaldırıldı' sayılmaz
+        for d in _dicts(discs):
+            _guard("duyuru", discussion, d, kind, cn, done_ids)
+
+    for fo in _dicts(m.try_call("mod_forum_get_forums_by_courses", default=[], courseids=cids)):
+        _guard("forum", forum, fo)
 
     # 3) Ödevler
-    res = m.try_call("mod_assign_get_assignments", default={}, courseids=cids) or {}
-    for c in res.get("courses", []):
-        cn = cname.get(c.get("id"), c.get("shortname", "?"))
-        for a in c.get("assignments", []):
-            due = a.get("duedate") or 0
-            intro = html_to_text(a.get("intro"))
-            text = f"Son teslim: {fmt_ts(due) if due else 'belirtilmemiş'}\n{intro}"
-            items.append(mk(f"assign:{a['id']}", "ödev", cn, a.get("name", ""), text, t=a.get("timemodified"),
-                            version=h(a.get("name"), due, intro)))
-            if due and due > now - 86400:
-                ev = struct_ev(cn, a.get("name", ""), "ödev teslimi", due, "moodle ödev")
-                if now < due < now + 14 * 86400 and _submitted(m, a["id"]):
-                    ev["done"] = True  # teslim edilmiş: listede ✓ ile görünür
-                struct.append(ev)
-            for f in a.get("introattachments") or []:
-                fn = f.get("filename", "")
-                items.append(mk(f"assignatt:{a['id']}:{fn}", "ödev eki", cn, f"{a.get('name')} / {fn}",
-                                t=f.get("timemodified"), version=f"{f.get('timemodified')}:{f.get('filesize')}",
-                                file={"url": f.get("fileurl"), "name": fn, "size": f.get("filesize") or 0}))
+    def assignment(a: Dict[str, Any], cn: str) -> None:
+        due = _num(a.get("duedate"))
+        name = _str(a.get("name"))
+        intro = html_to_text(a.get("intro"))
+        text = f"Son teslim: {fmt_ts(due) if due else 'belirtilmemiş'}\n{intro}"
+        items.append(mk(f"assign:{a.get('id')}", "ödev", cn, name, text, t=a.get("timemodified"),
+                        version=h(a.get("name"), due, intro)))
+        if due and due > now - 86400:
+            ev = struct_ev(cn, name, "ödev teslimi", due, "moodle ödev")
+            if now < due < now + 14 * 86400 and _submitted(m, a.get("id")):
+                ev["done"] = True  # teslim edilmiş: listede ✓ ile görünür
+            struct.append(ev)
+        for f in _dicts(a.get("introattachments")):
+            fn = _str(f.get("filename"))
+            items.append(mk(f"assignatt:{a.get('id')}:{fn}", "ödev eki", cn, f"{a.get('name')} / {fn}",
+                            t=f.get("timemodified"), version=f"{f.get('timemodified')}:{f.get('filesize')}",
+                            file={"url": f.get("fileurl"), "name": fn, "size": _num(f.get("filesize"))}))
+
+    res = m.try_call("mod_assign_get_assignments", default={}, courseids=cids)
+    for c in _dicts(_dict(res).get("courses")):
+        for a in _dicts(c.get("assignments")):
+            _guard("ödev", assignment, a, cname.get(c.get("id") if isinstance(c.get("id"), int) else None,
+                                                    _str(c.get("shortname")) or "?"))
 
     # 4) Quizler
-    res = m.try_call("mod_quiz_get_quizzes_by_courses", default={}, courseids=cids) or {}
-    for q in res.get("quizzes", []):
+    def quiz(q: Dict[str, Any]) -> None:
         cn = cname.get(q.get("course"), "?")
-        o, cl = q.get("timeopen") or 0, q.get("timeclose") or 0
+        o, cl = _num(q.get("timeopen")), _num(q.get("timeclose"))
+        name = _str(q.get("name"))
         intro = html_to_text(q.get("intro"))
         text = f"Açılış: {fmt_ts(o) if o else '-'}\nKapanış: {fmt_ts(cl) if cl else '-'}\n{intro}"
-        items.append(mk(f"quiz:{q['id']}", "quiz", cn, q.get("name", ""), text, version=h(q.get("name"), o, cl, intro)))
+        items.append(mk(f"quiz:{q.get('id')}", "quiz", cn, name, text, version=h(q.get("name"), o, cl, intro)))
         if o and o > now - 86400:
-            struct.append(struct_ev(cn, q.get("name", ""), "quiz açılış", o, "moodle quiz"))
+            struct.append(struct_ev(cn, name, "quiz açılış", o, "moodle quiz"))
         if cl and cl > now - 86400:
-            struct.append(struct_ev(cn, q.get("name", ""), "quiz kapanış", cl, "moodle quiz"))
+            struct.append(struct_ev(cn, name, "quiz kapanış", cl, "moodle quiz"))
+
+    res = m.try_call("mod_quiz_get_quizzes_by_courses", default={}, courseids=cids)
+    for q in _dicts(_dict(res).get("quizzes")):
+        _guard("quiz", quiz, q)
 
     # 5) Takvim
-    t0, t1 = now - 86400, now + LOOKAHEAD_DAYS * 86400
-    res = m.try_call("core_calendar_get_calendar_events", default={},
-                     events={"courseids": cids},
-                     options={"userevents": 1, "siteevents": 1, "timestart": t0, "timeend": t1}) or {}
-    cal = list(res.get("events", []))
-    res2 = m.try_call("core_calendar_get_action_events_by_timesort", default={},
-                      timesortfrom=t0, timesortto=t1, limitnum=50) or {}
-    seen_ids = {e.get("id") for e in cal}
-    for e in res2.get("events", []):
-        if e.get("id") not in seen_ids:
-            e.setdefault("timestart", e.get("timesort"))
-            e.setdefault("courseid", (e.get("course") or {}).get("id"))
-            cal.append(e)
-    for e in cal:
-        ts = e.get("timestart") or e.get("timesort")
+    def calendar(e: Dict[str, Any]) -> None:
+        ts = _num(e.get("timestart")) or _num(e.get("timesort"))
         if not ts:
-            continue
+            return
         cn = cname.get(e.get("courseid"), "Genel")
+        name = _str(e.get("name"))
         desc = html_to_text(e.get("description"))
-        typ = e.get("modulename") or e.get("eventtype") or "etkinlik"
-        struct.append(struct_ev(cn, e.get("name", ""), typ, ts, "moodle takvim"))
-        items.append(mk(f"cal:{e.get('id')}", "takvim", cn, e.get("name", ""),
+        typ = _str(e.get("modulename")) or _str(e.get("eventtype")) or "etkinlik"
+        struct.append(struct_ev(cn, name, typ, ts, "moodle takvim"))
+        items.append(mk(f"cal:{e.get('id')}", "takvim", cn, name,
                         f"{fmt_ts(ts)}\n{desc}", t=e.get("timemodified"), version=h(e.get("name"), ts, desc),
                         extract=bool(desc)))
 
+    t0, t1 = now - 86400, now + LOOKAHEAD_DAYS * 86400
+    res = m.try_call("core_calendar_get_calendar_events", default={},
+                     events={"courseids": cids},
+                     options={"userevents": 1, "siteevents": 1, "timestart": t0, "timeend": t1})
+    cal = _dicts(_dict(res).get("events"))
+    res2 = m.try_call("core_calendar_get_action_events_by_timesort", default={},
+                      timesortfrom=t0, timesortto=t1, limitnum=50)
+    seen_ids = {_str(e.get("id")) for e in cal}
+    for e in _dicts(_dict(res2).get("events")):
+        if _str(e.get("id")) not in seen_ids:
+            e.setdefault("timestart", e.get("timesort"))
+            e.setdefault("courseid", _dict(e.get("course")).get("id"))
+            cal.append(e)
+    for e in cal:
+        _guard("takvim", calendar, e)
+
     # 6) Bildirimler (not girildi, yeni gönderi vb.)
-    res = m.try_call("message_popup_get_popup_notifications", default={}, useridto=userid, limit=50, offset=0) or {}
-    for n in res.get("notifications", []):
-        body = n.get("smallmessage") or html_to_text(n.get("fullmessagehtml")) or n.get("fullmessage") or ""
-        items.append(mk(f"notif:{n.get('id')}", "bildirim", "Bildirim", n.get("subject", ""), body,
-                        t=n.get("timecreated"), version="1", url=n.get("contexturl") or ""))
+    def notification(nt: Dict[str, Any]) -> None:
+        body = _str(nt.get("smallmessage")) or html_to_text(nt.get("fullmessagehtml")) or _str(nt.get("fullmessage"))
+        items.append(mk(f"notif:{nt.get('id')}", "bildirim", "Bildirim", nt.get("subject"), body,
+                        t=nt.get("timecreated"), version="1", url=_str(nt.get("contexturl"))))
+
+    res = m.try_call("message_popup_get_popup_notifications", default={}, useridto=userid, limit=50, offset=0)
+    for nt in _dicts(_dict(res).get("notifications")):
+        _guard("bildirim", notification, nt)
 
     # 7) Mesajlar (hocalardan / asistanlardan)
-    res = m.try_call("core_message_get_conversations", default={}, userid=userid, limitfrom=0, limitnum=20) or {}
-    for conv in res.get("conversations", []):
-        who = ", ".join(mb.get("fullname", "") for mb in conv.get("members", []) if mb.get("id") != userid)
-        for msg in conv.get("messages", []):
+    def conversation(conv: Dict[str, Any]) -> None:
+        who = ", ".join(_str(mb.get("fullname")) for mb in _dicts(conv.get("members")) if mb.get("id") != userid)
+        for msg in _dicts(conv.get("messages")):
             if msg.get("useridfrom") == userid:
                 continue
-            items.append(mk(f"msg:{msg.get('id')}", "mesaj", "Mesaj", f"{who or conv.get('name', '')}",
+            items.append(mk(f"msg:{msg.get('id')}", "mesaj", "Mesaj", who or _str(conv.get("name")),
                             html_to_text(msg.get("text")), t=msg.get("timecreated"), version="1"))
 
+    res = m.try_call("core_message_get_conversations", default={}, userid=userid, limitfrom=0, limitnum=20)
+    for conv in _dicts(_dict(res).get("conversations")):
+        _guard("mesaj", conversation, conv)
+
     # 8) Notlar (hoca not girdiğinde / değiştirdiğinde)
-    for c in courses:
+    def grades(c: Dict[str, Any]) -> None:
         try:
             res = m.call("gradereport_user_get_grade_items", courseid=c["id"], userid=userid)
-            ugs = (res.get("usergrades") or []) if isinstance(res, dict) else []
-            rows = [g for ug in ugs for g in (ug.get("gradeitems") or [])
+            rows = [g for ug in _dicts(_dict(res).get("usergrades")) for g in _dicts(ug.get("gradeitems"))
                     if g.get("itemtype") in ("mod", "manual") and g.get("graderaw") is not None]
         except MoodleError as e:
             # Bazı derslerde Moodle bu raporu üretemiyor (invalidresponse): not tablosundan oku
@@ -667,11 +762,18 @@ def collect(m: Moodle, reply_cache: Optional[Dict[str, Any]] = None) -> Dict[str
                                                 courseid=c["id"], userid=userid))
             log(f"Not raporu {cname[c['id']]} (id {c['id']}): yedek tablo yöntemi, {len(rows)} not ({str(e)[:60]})")
         for g in rows:
-            fb = html_to_text(g.get("feedback"))
-            items.append(mk(f"grade:{c['id']}:{g.get('id')}", "not", cname[c["id"]], g.get("itemname") or "Not",
-                            fmt_grade(g) + (f"\n{fb}" if fb else ""),
-                            t=g.get("gradedategraded") or g.get("gradedatesubmitted"),
-                            version=h(g.get("graderaw"), fb), extract=False))
+            _guard("not", grade, c, g)
+
+    def grade(c: Dict[str, Any], g: Dict[str, Any]) -> None:
+        fb = html_to_text(g.get("feedback"))
+        stats = grade_stats(g)
+        items.append(mk(f"grade:{c['id']}:{g.get('id')}", "not", cname[c["id"]], _str(g.get("itemname")) or "Not",
+                        fmt_grade(g) + (f" · {stats}" if stats else "") + (f"\n{fb}" if fb else ""),
+                        t=g.get("gradedategraded") or g.get("gradedatesubmitted"),
+                        version=h(g.get("graderaw"), fb), extract=False))
+
+    for c in courses:
+        _guard("not", grades, c)
 
     # tekilleştir
     uniq: Dict[str, Dict[str, Any]] = {}
@@ -681,9 +783,10 @@ def collect(m: Moodle, reply_cache: Optional[Dict[str, Any]] = None) -> Dict[str
     for e in struct:
         sd[h(e["course"], e["title"], e["date"], e["time"])] = e
     log(f"{len(uniq)} öğe, {len(sd)} tarihli etkinlik toplandı")
+    # Bir kayıt okunamadıysa neyin eksik olduğu bilinemez: bu çalıştırmada hiçbir şey 'kaldırıldı' sayılmaz
+    no_hide = ("",) if SKIPPED else (("disc:", "reply:", "att:") if capped[0] else ())
     return {"userid": userid, "courses": courses, "cname": cname, "items": list(uniq.values()),
-            "struct": list(sd.values()), "reply_cache": new_cache,
-            "no_hide": ("disc:", "reply:", "att:") if capped else ()}
+            "struct": list(sd.values()), "reply_cache": new_cache, "no_hide": no_hide}
 
 
 # ---------------------------------------------------------------- Claude
@@ -884,7 +987,7 @@ def build_context(data: Dict[str, Any], state: Dict[str, Any], new_items: List[D
                      "updated": it.get("updated", False)})
     news.sort(key=lambda x: rank.get(x["importance"], 1))
     return {"today": f"{today:%Y-%m-%d} {GUN[today.weekday()]}",
-            "courses": {c.get("shortname"): c.get("fullname") for c in data["courses"]},
+            "courses": {_str(c.get("shortname")): _str(c.get("fullname")) for c in data["courses"]},
             "moodle_calendar_and_deadlines": upcoming[:120],
             "dates_found_in_documents": from_docs[:150],
             "new_since_last_brief": news[:60],
@@ -1084,7 +1187,43 @@ def _refine(best: Optional[str], low: str, s: int, title_low: str, sentence_low:
     return best
 
 
-def regex_dates(text: str, posted: Optional[int] = None, title: str = "") -> List[Dict[str, Any]]:
+# Sınav yeri: "in M100 and M1170", "Room: NH 304", "Yer: KB301". Oda kodu = 1-4 büyük harf + 2-4 rakam.
+ROOM = r"[A-ZÇĞİÖŞÜ]{1,4} ?-?\d{2,4}[A-Z]?"
+RE_ROOM = re.compile(r"(?<![A-Za-zÇĞİÖŞÜçğıöşü\d])" + ROOM + r"(?![A-Za-zçğıöşü\d])")
+_ROOMS = ROOM + r"(?:\s*(?:,|and|ve|veya|or|&|/)\s*" + ROOM + r")*"
+RE_PLACE = re.compile(
+    r"(?:\b(?:in|at)\s+(?:the\s+)?(?:(?:class|lecture\s+)?(?:rooms?|halls?)\s+)?\(?\s*"
+    r"|\b(?:in|at)\s+[^.,;()\n]{2,40}?\(\s*"       # "at the BUFAIM Lab (M2142)"
+    r"|\b(?:class)?rooms?\s*:?\s*\(?\s*"
+    r"|\b(?:place|location|venue|yer|salon(?:lar)?|s[ıi]n[ıi]f(?:lar)?|derslik(?:ler)?)\s*:\s*)(" + _ROOMS + r")", re.I)
+RE_PLACE_LABEL = re.compile(
+    r"(?<![^\W\d_])(?:(?:class)?rooms?|place|location|venue|yer|salon(?:lar)?|s[ıi]n[ıi]f(?:lar)?|derslik(?:ler)?)\s*:\s*("
+    + _ROOMS + r")", re.I)
+NOT_ROOMS = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "SEPT", "OCT", "NOV", "DEC", "HW", "PS",
+             "CH", "WK", "EX", "MT", "Q", "V", "NO", "OCAK", "MART", "EKİM"}
+
+
+def _rooms(found: str, course: str) -> str:
+    out: List[str] = []
+    for tok in RE_ROOM.findall(found):
+        code = re.sub(r"[ -]", "", tok)
+        if code == course or re.match(r"[^\d]+", code).group(0) in NOT_ROOMS or code in out:
+            continue  # dersin kendi kodu ("in IE202") ya da "NOV 17" oda değildir
+        out.append(code)
+    return ", ".join(out[:4])
+
+
+def find_place(sentence: str, course: str = "", whole: str = "") -> str:
+    """Tarihin geçtiği cümledeki sınav/etkinlik yeri; cümlede yoksa metindeki etiketli bilgi ("Rooms: …")."""
+    for rx, src in ((RE_PLACE, sentence), (RE_PLACE_LABEL, whole)):
+        for mt in rx.finditer(src or ""):
+            rooms = _rooms(mt.group(1), course)
+            if rooms:
+                return rooms
+    return ""
+
+
+def regex_dates(text: str, posted: Optional[int] = None, title: str = "", course: str = "") -> List[Dict[str, Any]]:
     """Metindeki tarihleri bulur, aynı cümledeki anahtar kelimeye göre türünü belirler.
     posted: duyurunun yayın zamanı ('yarın', 'next Monday' gibi göreli ifadeler için)."""
     if not text:
@@ -1155,6 +1294,9 @@ def regex_dates(text: str, posted: Optional[int] = None, title: str = "") -> Lis
                           "time": _find_time(text, s, e), "certainty": "approximate", "detail": "metinden"}
             if wd_flag:
                 found[key]["weekday_mismatch"] = True
+            place = find_place(text[a:b], course, text if best in ("midterm", "final", "quiz", "exam") else "")
+            if place:
+                found[key]["place"] = place
     # göreli ifadeler: sadece yayın tarihi biliniyorsa ve cümlede açık bir tarih yoksa
     if posted:
         pd = datetime.fromtimestamp(posted, TZ).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
@@ -1181,6 +1323,9 @@ def regex_dates(text: str, posted: Optional[int] = None, title: str = "") -> Lis
             if key not in found:
                 found[key] = {"title": _sentence(text, s, e), "type": best, "date": f"{d:%Y-%m-%d}",
                               "time": _find_time(text, s, e), "certainty": "approximate", "detail": "göreli"}
+                place = find_place(text[a:b], course, text if best in ("midterm", "final", "quiz", "exam") else "")
+                if place:
+                    found[key]["place"] = place
     return list(found.values())
 
 
@@ -1190,7 +1335,7 @@ def free_extract(it: Dict[str, Any]) -> Dict[str, Any]:
         return {"summary": f"Dosya: {it['file']['name']}", "importance": "low", "events": []}
     one = re.sub(r"\s+", " ", text).strip()
     rel_ok = it["kind"] in ("duyuru", "forum", "duyuru cevabı", "forum cevabı", "mesaj", "bildirim")
-    events = regex_dates(text, it.get("time") if rel_ok else None, it.get("title") or "") \
+    events = regex_dates(text, it.get("time") if rel_ok else None, it.get("title") or "", it.get("course") or "") \
         if it["kind"] not in ("takvim", "not") else []
     imp = "high" if it["kind"] in ("duyuru", "mesaj") or any(e["type"] in ("class_change", "midterm", "final", "exam") for e in events) else "medium"
     return {"summary": one[:160], "importance": imp, "events": events}
@@ -1292,7 +1437,13 @@ def merged_events(ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue  # yakında sınav/ödev kelimesi olmayan tarih — duyuru metninde zaten görünüyor
         sl = exam_slot(e)
         if sl and (e.get("course"), sl) in exact_slots:
-            continue  # Moodle'ın kendi kaydı (quiz modülü/takvim) metinden çıkan tarihten daha güvenilir
+            # Moodle'ın kendi kaydı (quiz modülü/takvim) metinden çıkan tarihten daha güvenilir;
+            # ama yer bilgisi sadece duyuruda yazar, o kayda taşınır
+            if e.get("place"):
+                for o in out:
+                    if o.get("certainty") == "exact" and o["course"] == e.get("course") and _exact_slot(o) == sl:
+                        o.setdefault("place", e["place"])
+            continue
         typ, day, item = e.get("type"), _display_dt(e)[0], str(e.get("item") or "")
         if typ in ("assignment", "project") and item.startswith(("assign:", "mod:", "cal:")):
             # Tarih, bir ödevin KENDİ açıklamasından geliyor. Moodle'daki teslim tarihiyle aynıysa tekrardır;
@@ -1324,6 +1475,8 @@ def merged_events(ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
                 # aynı şey. Tek istisna: bir teslimle aynı güne düşen, SAATİ FARKLI itiraz oturumu / ders
                 # değişikliği ayrı bir olaydır (saatler aynıysa Moodle kaydı zaten o oturumdur: randevu modülü)
                 dup = True
+                if e.get("place"):
+                    o.setdefault("place", e["place"])
                 break
         if not dup:
             out.append(dict(e))
@@ -1351,6 +1504,7 @@ def _line(e: Dict[str, Any], with_date: bool) -> str:
         d = e["_d"]
         when = f" · {d.day} {AY_KISA[d.month - 1]} {GUN_KISA[d.weekday()]}"
     t = f" {e['_t']}" if e.get("_t") else ""
+    t += _place(e)
     tail = f" ({_left(e['_n'])})" if with_date else ""
     chg = ""
     if e.get("changed_from"):
@@ -1372,7 +1526,9 @@ def _text_conflict(e: Dict[str, Any]) -> str:
 
 
 def _link(url: str, text: str = "Moodle'da aç") -> str:
-    return f'<a href="{html.escape(url, quote=True)}">{E(text)}</a>' if url else ""
+    if not url or len(url) > 500 or not re.match(r"https?://\S+$", url):
+        return ""  # bağlantı olmayan / aşırı uzun bir değer mesajın biçimini bozmasın
+    return f'<a href="{html.escape(url, quote=True)}">{E(text)}</a>'
 
 
 KIND_TR = {"etkinlik (label)": "sayfa metni", "etkinlik (resource)": "dosya", "etkinlik (url)": "bağlantı",
@@ -1536,6 +1692,8 @@ def ann_facts(events: List[Dict[str, Any]], limit: int = 3) -> List[str]:
     for d, t, n, e in sorted(rows, key=lambda r: (r[0], r[1] or "99")):
         typ = e.get("type") or "other"
         fact = f"{TYPE_LABEL[typ]} {_when(d, t, n)}" if typ in TYPE_LABEL else _cut(e.get("title") or "", 90)
+        if typ in TYPE_LABEL and e.get("place"):
+            fact += f" · {e['place']}"
         if fact and fact not in out:
             out.append(fact)
     return out[:limit]
@@ -1616,6 +1774,8 @@ def filter_other(other: List[Dict[str, Any]], shown: List[Dict[str, Any]]) -> Li
             low = html.unescape(it.get("title") or "").lower()
             if any(t in low for t in titles):
                 continue
+            if re.search(r"\b(content change|içerik değişikliği)\s*$", low):
+                continue  # "ders içeriği değişti" bildirimi: neyin değiştiğini zaten bu özet söylüyor
         out.append(it)
     return out
 
@@ -1656,26 +1816,61 @@ def group_other(items: List[Dict[str, Any]], max_lines: int = 6) -> List[str]:
     return lines
 
 
+def _place(e: Dict[str, Any]) -> str:
+    """' · M100, M1170' — satırda zaten yazıyorsa (kısa duyuru cümlesi etiketin içindeyse) tekrarlanmaz."""
+    rooms = [r for r in (e.get("place") or "").split(", ") if r]
+    if not rooms or all(r in re.sub(r"(?<=[A-ZÇĞİÖŞÜ])[ -](?=\d)", "", _label(e)) for r in rooms):
+        return ""
+    return f" · {E(', '.join(rooms))}"
+
+
+def _row(e: Dict[str, Any], when: str) -> str:
+    """Bugün / Bu hafta / akşam hatırlatması satırı: '• 17:00 IE202 Ara sınav ❔ · M100'."""
+    mark = " ❔" if e.get("certainty") == "approximate" else ""
+    warn = " ⚠️" if e.get("changed_from") or e.get("weekday_mismatch") else ""
+    place = _place(e)
+    done = " ✓ teslim edildi" if e.get("done") else ""
+    return (f"• {when + ' ' if when else ''}<b>{E(e['course'])}</b> {E(_label(e).rstrip(' ❔'))}{mark}{warn}{place}{done}"
+            + _text_conflict(e))
+
+
+def reminder_text(ctx: Dict[str, Any]) -> str:
+    """Akşam hatırlatması: yarınki sınav/teslim/etkinlikler ve bu gece dolacak işler. Teslim edilmiş ödevler
+    yazılmaz. Hatırlatılacak bir şey yoksa boş döner (mesaj gönderilmez)."""
+    now = datetime.now(TZ)
+    evs = merged_events(ctx)
+    tonight = [e for e in evs if e["_n"] == 0 and not e.get("done") and (e.get("_t") or "") > now.strftime("%H:%M")]
+    tomorrow = [e for e in evs if e["_n"] == 1 and not e.get("done")]
+    if not tonight and not tomorrow:
+        return ""
+    L: List[str] = []
+    if tomorrow:
+        d = now + timedelta(days=1)
+        L.append(f"🌙 <b>Yarın · {d.day} {AY_KISA[d.month - 1]} {GUN[d.weekday()]}</b>")
+        L += [_row(e, e.get("_t") or "") for e in tomorrow]
+    if tonight:
+        L.append(("\n" if L else "🌙 ") + "⏳ <b>Bu gece</b>")
+        L += [_row(e, e.get("_t") or "") for e in tonight]
+    if any(e.get("certainty") == "approximate" for e in tonight + tomorrow):
+        L.append("\n<i>❔ = duyuru metninden çıkarıldı, teyit et</i>")
+    return "\n".join(L)
+
+
 def free_brief(ctx: Dict[str, Any], new_items: List[Dict[str, Any]]) -> str:
     """Moodle akışının özeti. Boş bölüm yazılmaz; duyuruların metni değil içindeki kritik bilgi yazılır."""
     today = datetime.now(TZ)
     now_ts = int(today.timestamp())
     evs = merged_events(ctx)
     L = [f"☀️ <b>{today.day} {AY_KISA[today.month - 1]} {GUN[today.weekday()]}</b>"]
-
-    def row(e: Dict[str, Any], when: str) -> str:
-        mark = " ❔" if e.get("certainty") == "approximate" else ""
-        warn = " ⚠️" if e.get("changed_from") or e.get("weekday_mismatch") else ""
-        done = " ✓ teslim edildi" if e.get("done") else ""
-        return (f"• {when + ' ' if when else ''}<b>{E(e['course'])}</b> {E(_label(e).rstrip(' ❔'))}{mark}{warn}{done}"
-                + _text_conflict(e))
+    row = _row
 
     todays = [e for e in evs if e["_n"] == 0]
     if todays:
         L.append("\n📌 <b>BUGÜN</b>")
         L += [row(e, e.get("_t") or "") for e in todays]
 
-    exams = [e for e in evs if is_exam(e)][:3]
+    # bugünkü sınav zaten BUGÜN'de yazıyor; aynı satır bir de burada tekrarlanmaz
+    exams = [e for e in evs if is_exam(e) and e["_n"] >= 1][:3]
     if exams:
         L.append("\n🎯 <b>SINAVLAR</b>")
         L += [_line(e, True) for e in exams]
@@ -1705,7 +1900,9 @@ def free_brief(ctx: Dict[str, Any], new_items: List[Dict[str, Any]]) -> str:
             lines = (it.get("text") or "").split("\n")
             fb = re.sub(r"\s+", " ", " ".join(lines[1:])).strip()
             upd = " (değişti)" if it.get("updated") else ""
-            L.append(f"• <b>{E(it['course'])}</b> {E(it['title'][:60])}: <b>{E(lines[0])}</b>{upd}"
+            val, _, stats = lines[0].partition(" · ")  # "28/40 · ort. 21.5": not kalın, sınıf ortalaması yalın
+            L.append(f"• <b>{E(it['course'])}</b> {E(it['title'][:60])}: <b>{E(val)}</b>"
+                     f"{' · ' + E(stats) if stats else ''}{upd}"
                      + (f" — <i>{E(_cut(fb, 100))}</i>" if fb else ""))
     if ann:
         L.append("\n📣 <b>DUYURULAR</b>")
@@ -1742,11 +1939,18 @@ def tg_send(text: str, parse_mode: Optional[str] = None) -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID .env'de yok")
     chunks, cur = [], ""
     for line in text.split("\n"):
+        if len(line) > 3900 and parse_mode:
+            # Tek satır bir mesaja sığmıyor: ortadan bölmek <b>…</b> etiketini koparır. Biçimi bırak, metni koru.
+            line = html.escape(html.unescape(re.sub(r"</?(?:b|i)>|<a [^>]*>|</a>", "", line)), quote=False)
         while len(line) > 3900:
             chunks.append(cur) if cur else None
             cur = ""
-            chunks.append(line[:3900])
-            line = line[3900:]
+            cut = 3900
+            amp = line.rfind("&", cut - 12, cut)  # "&amp;" gibi bir kodun ortasından bölme
+            if amp != -1 and ";" not in line[amp:cut]:
+                cut = amp
+            chunks.append(line[:cut])
+            line = line[cut:]
         if len(cur) + len(line) + 1 > 3900:
             chunks.append(cur)
             cur = ""
@@ -1852,6 +2056,7 @@ def check_config(need_claude: bool = True) -> None:
 
 SCHEMA = 2  # öğe sürüm biçimi değiştiğinde artar; eski kayıtlar 'güncellendi' diye yağmasın
 SEND_TIME = os.getenv("SEND_TIME", "07:30")
+REMINDER_TIME = os.getenv("REMINDER_TIME", "20:00")  # akşam hatırlatması; kapatmak için REMINDER_TIME=off
 IN_CLOUD = os.getenv("GITHUB_ACTIONS") == "true"
 SECRET_NAME = "BRIEF_SECRETS"  # ayarların durduğu GitHub secret'ının adı (hata mesajlarında gösterilir)
 
@@ -1861,6 +2066,18 @@ def _send_time_passed() -> bool:
         hh, mm = (int(x) for x in SEND_TIME.split(":"))
     except Exception:
         hh, mm = 7, 30
+    n = datetime.now(TZ)
+    return (n.hour, n.minute) >= (hh, mm)
+
+
+def _reminder_due(state: Dict[str, Any], today: str) -> bool:
+    """Akşam hatırlatmasının saati geldi mi (ve bugün henüz bakılmadı mı)?"""
+    if state.get("last_reminder_date") == today:
+        return False
+    try:
+        hh, mm = (int(x) for x in REMINDER_TIME.split(":"))
+    except Exception:
+        return False  # "off" ya da okunamayan değer: hatırlatma kapalı
     n = datetime.now(TZ)
     return (n.hour, n.minute) >= (hh, mm)
 
@@ -1895,13 +2112,15 @@ def notify_error_once(kind: str, text: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Moodle sabah brifingi")
-    ap.add_argument("cmd", nargs="?", default="run", choices=["run", "test", "init", "courses", "setup-telegram"])
+    ap.add_argument("cmd", nargs="?", default="run",
+                    choices=["run", "test", "init", "courses", "setup-telegram", "remind"])
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--scheduled", action="store_true",
                     help="zamanlayıcıdan çağrıldı: gönderim saati gelmediyse ya da bugün gönderildiyse sessizce çık")
     args = ap.parse_args()
     rotate_log()
     main.scheduled = args.scheduled  # hata yakalayıcı için
+    main.quiet = False
 
     if args.cmd == "setup-telegram":
         return setup_telegram()
@@ -1920,11 +2139,16 @@ def main() -> None:
     check_config()
     state = load_state()
     today = datetime.now(TZ).strftime("%Y-%m-%d")
+    # Akşam hatırlatması: 'remind' komutu ya da sabah brifingi gitmiş bir günde zamanlayıcının akşam çağrısı
+    remind = args.cmd == "remind"
     if args.cmd == "run" and state.get("last_sent_date") == today and not args.force:
-        if not args.scheduled:
-            log("Bugünün brifingi zaten gönderildi, çıkılıyor.")
-        return
-    if args.scheduled and not _send_time_passed():
+        if args.scheduled and _reminder_due(state, today):
+            remind = True
+        else:
+            if not args.scheduled:
+                log("Bugünün brifingi zaten gönderildi, çıkılıyor.")
+            return
+    if args.scheduled and not remind and not _send_time_passed():
         return  # henüz gönderim saati değil
     if args.scheduled and not IN_CLOUD and (BASE_DIR / "CLOUD_ACTIVE").exists():
         return  # brifing artık GitHub'dan gidiyor; Mac'teki kopya çift mesaj atmasın
@@ -1934,8 +2158,11 @@ def main() -> None:
         return
     main.lock = lock  # entry() çalıştırma bitince (hata olsa da) kilidi bırakır
     state = load_state()  # kilitten sonra güncel hali oku
-    if args.cmd == "run" and state.get("last_sent_date") == today and not args.force:
+    if remind and args.scheduled and state.get("last_reminder_date") == today:
         return
+    if not remind and args.cmd == "run" and state.get("last_sent_date") == today and not args.force:
+        return
+    main.quiet = remind and args.scheduled  # hatırlatma gönderilemezse sessiz kal: sabah brifingi zaten gelecek
 
     global _ARCHIVE_VERSIONS
     _ARCHIVE_VERSIONS = None  # arşiv her çalıştırmada baştan okunur
@@ -2027,7 +2254,8 @@ def main() -> None:
     # (örn. mesajlaşması 'disabled' olan siteler) ya da içerikle ilgisiz uyarılar bu kuralı durdurmaz.
     content_fns = ("core_course_get_contents", "mod_forum_", "mod_assign_", "mod_quiz_", "core_calendar_")
     content_blocked = any(w.startswith(content_fns) and "disabled" not in w.lower() for w in WARNINGS)
-    for k, ex in state["extracted"].items():
+    # akşam hatırlatması bir "çalıştırma" sayılmaz: gizleme sayaçlarına dokunmaz
+    for k, ex in (state["extracted"].items() if not remind else ()):
         if k in live:
             missing.pop(k, None)
             ex.pop("hidden", None)
@@ -2040,13 +2268,27 @@ def main() -> None:
                         ex.get("kind") in ("duyuru", "duyuru cevabı", "ödev", "quiz") or ex.get("events")):
                     newly_hidden.append(ex)
 
-    for it in new_items:
+    for it in (new_items if not remind else ()):
         log(f"YENİ: [{it['course']}] {it['kind']}: {it['title']}")
 
     for it in new_items:  # özet, duyurunun metni yerine içindeki tarihli bilgiyi yazar
         it["events"] = state["extracted"].get(it["key"], {}).get("events", [])
     ctx = build_context(data, state, new_items)
     ctx["removed"] = [{"course": x.get("course"), "kind": x.get("kind"), "title": x.get("title")} for x in newly_hidden]
+    if remind:
+        # Yeni öğeler 'görüldü' işaretlenmez: sabah brifinginde yine haber olarak çıkarlar
+        text = reminder_text(ctx)
+        if args.scheduled:
+            state["last_reminder_date"] = today
+        save_state(state)
+        if text:
+            tg_send(text, parse_mode="HTML")
+            log("Akşam hatırlatması gönderildi.")
+        else:
+            log("Akşam hatırlatması: yarın ve bu gece için hatırlatılacak bir şey yok.")
+            if not args.scheduled:
+                print("Hatırlatılacak bir şey yok.")
+        return
     is_html = True
     if FREE_MODE:
         brief = free_brief(ctx, new_items)
@@ -2120,6 +2362,8 @@ def _guarded_main() -> None:
         sys.exit(1)
     except TransientError as e:
         log(f"Geçici hata (sonra tekrar denenecek): {e}")
+        if getattr(main, "quiet", False):
+            sys.exit(0)
         # zamanlayıcı 30 dk'da bir tekrar dener; öğlene kadar hâlâ olmuyorsa bir kez haber ver
         if not getattr(main, "scheduled", False) or datetime.now(TZ).hour >= 12:
             notify_error_once("transient", f"⚠️ Moodle brifingi henüz gönderilemedi: Moodle'a ya da internete "
