@@ -87,7 +87,7 @@ MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "40000"))
 LOOKAHEAD_DAYS = int(os.getenv("LOOKAHEAD_DAYS", "45"))
 # API key yoksa ücretsiz mod: Claude kullanılmaz, tarihler metinden kurallarla çıkarılır
 FREE_MODE = not ANTHROPIC_API_KEY
-MODE = "free8" if FREE_MODE else "claude"  # kurallar değişince artar: kayıtlı öğeler yeniden taranır
+MODE = "free9" if FREE_MODE else "claude"  # kurallar değişince artar: kayıtlı öğeler yeniden taranır
 
 
 def _id_list(name: str) -> List[int]:
@@ -542,6 +542,7 @@ def collect(m: Moodle, reply_cache: Optional[Dict[str, Any]] = None) -> Dict[str
     del SKIPPED[:]
     info = m.call("core_webservice_get_site_info")
     userid = _dict(info).get("userid")
+    lastname = _str(_dict(info).get("lastname")).strip() or (_str(_dict(info).get("fullname")).split() or [""])[-1]
     if not userid:
         raise TransientError("Moodle kullanıcı bilgisini vermedi (bakımda olabilir)")
     courses = active_courses(m, userid)
@@ -786,7 +787,7 @@ def collect(m: Moodle, reply_cache: Optional[Dict[str, Any]] = None) -> Dict[str
     # Bir kayıt okunamadıysa neyin eksik olduğu bilinemez: bu çalıştırmada hiçbir şey 'kaldırıldı' sayılmaz
     no_hide = ("",) if SKIPPED else (("disc:", "reply:", "att:") if capped[0] else ())
     return {"userid": userid, "courses": courses, "cname": cname, "items": list(uniq.values()),
-            "struct": list(sd.values()), "reply_cache": new_cache, "no_hide": no_hide}
+            "struct": list(sd.values()), "reply_cache": new_cache, "no_hide": no_hide, "lastname": lastname}
 
 
 # ---------------------------------------------------------------- Claude
@@ -940,14 +941,17 @@ def supersede(evs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         newest = max(x["posted"] for x in g)
         keep = [x for x in g if x["posted"] == newest]
-        old = sorted({x["date"] for x in g if x["posted"] != newest} - {x["date"] for x in keep})
+        kept_dates = {x["date"] for x in keep}
+        old = sorted({x["date"] for x in g if x["posted"] != newest} - kept_dates)
+        # Değişiklik, yeni tarihi İLK veren duyuruyla olmuştur; sonradan gelen hatırlatma onu tazelemez
+        changed_at = min(x["posted"] for x in g if x["date"] in kept_dates)
         if slot in ("quiz", "exam"):
             # Numarasız quiz/sınav her hafta yeniden duyurulur ("Quiz Pazartesi"). Eski tarih, yeni duyuru
             # yazıldığında zaten geçmişse bu bir tarih değişikliği değil, sıradaki quizdir.
             written = datetime.fromtimestamp(newest, TZ).strftime("%Y-%m-%d")
             old = [d for d in old if d >= written]
         # Uyarı, değişiklik tazeyken ya da eski tarih henüz geçmemişken işe yarar; sonrası tekrar olur
-        fresh = newest > datetime.now(TZ).timestamp() - STALE_DAYS * 86400 or bool(old and (days_left(old[-1]) or 0) >= 0)
+        fresh = changed_at > datetime.now(TZ).timestamp() - STALE_DAYS * 86400 or bool(old and (days_left(old[-1]) or 0) >= 0)
         for x in keep:
             if old and fresh:
                 x["changed_from"] = old[-1]
@@ -975,7 +979,11 @@ def build_context(data: Dict[str, Any], state: Dict[str, Any], new_items: List[D
     for e in supersede(all_docs):  # eski duyurudaki tarih, yeni duyuruyla değiştiyse eskisini at
         dl = days_left(e["date"])
         if dl >= 0:
-            from_docs.append({**e, "days_left": dl})
+            e = {**e, "days_left": dl}
+            mine = seat_for(data.get("lastname") or "", e.get("seats"))
+            if mine:  # salonlar soyada göre dağıtılmış: öğrencinin kendi salonu (soyadı kayda yazılmaz)
+                e["my_place"], e["my_range"] = mine[2], f"{mine[0]}–{mine[1]}"
+            from_docs.append(e)
     upcoming.sort(key=lambda e: (e["date"], e.get("time") or ""))
     from_docs.sort(key=lambda e: (e["date"], e.get("time") or ""))
     news = []
@@ -1119,9 +1127,14 @@ RE_NOT_EVENT_AFTER = re.compile(
     r"|^s?\S*\s*(?:\S+\s+){0,3}(?:duyurulacak|açıklanacak|ilan edilecek|paylaşılacak)")
 RE_NOT_EVENT_BEFORE = re.compile(r"(?:before|after|for|until|prior to|öncesi|sonrası|için)\s+(?:the\s+)?$")
 # "from Nov 11 to Nov 17", "11 Kasım yerine 17 Kasım" → eski tarih
+# "I mentioned 1st of December as the possible exam date, but …", "daha önce 1 Aralık demiştim" de eski tarihtir
 RE_OLD_BEFORE = re.compile(r"(?:\bfrom|instead of|rather than|previously|originally|was scheduled (?:for|on)|"
-                           r"was planned (?:for|on)|moved from|eski tarih|önceki tarih)\s*(?:the\s+|on\s+)?$")
-RE_OLD_AFTER = re.compile(r"^\s*(?:'?(?:dan|den|tan|ten)\b)?\s*(?:tarihinden|tarihindeki|yerine)")
+                           r"was planned (?:for|on)|moved from|eski tarih|önceki tarih|daha önce|"
+                           r"\b(?:i|we)\s+(?:had\s+)?(?:mentioned|announced|said|stated|wrote|told you)(?:\s+that)?)"
+                           r"\s*(?:the\s+|on\s+)?$")
+RE_OLD_AFTER = re.compile(r"^\s*(?:'?(?:dan|den|tan|ten)\b)?\s*(?:tarihinden|tarihindeki|yerine|"
+                          r"as (?:the|a) (?:possible|tentative|initial|original|probable)|"
+                          r"demiştim|demiştik|olarak duyur(?:ul)?muştu|olarak açıklanmıştı)")
 # "at the BUFAIM Lab (M2142)": lab burada yer adı, etkinlik türü değil
 RE_PLACE_BEFORE = re.compile(r"(?<![^\W_])(?:at|in|@)\s+(?:the\s+)?(?:[\w.&-]+\s+){0,2}$")
 RE_REVIEW = re.compile(r"objections?|itiraz|review session|paper viewing|ka[ğg][ıi]t inceleme")
@@ -1221,6 +1234,50 @@ def find_place(sentence: str, course: str = "", whole: str = "") -> str:
             if rooms:
                 return rooms
     return ""
+
+
+# Soyada göre salon dağılımı:  "AÇ – İNCEBOY: M1100"  /  "M1170: İPEK – ZELKA"
+_NAME = r"[A-Za-zÇĞİÖŞÜçğıöşüÂâÎîÛû]+(?:[ '’][A-Za-zÇĞİÖŞÜçğıöşüÂâÎîÛû]+)?"
+RE_SEAT = re.compile(r"(?m)^\s*[-•*]?\s*(" + _NAME + r")\s*[–—-]+\s*(" + _NAME + r")\s*[:=→>]*\s*\(?(" + ROOM
+                     + r")\)?\s*[.,;]?\s*$")
+RE_SEAT_REV = re.compile(r"(?m)^\s*[-•*]?\s*\(?(" + ROOM + r")\)?\s*[:=→>]+\s*(" + _NAME + r")\s*[–—-]+\s*(" + _NAME
+                         + r")\s*[.,;]?\s*$")
+TR_ALPHA = "ABCÇDEFGĞHIİJKLMNOÖPQRSŞTUÜVWXYZ"
+
+
+def _tr_key(s: Any) -> List[int]:
+    """Türkçe alfabe sırasına göre karşılaştırma anahtarı (Ö, O ile P arasındadır; i→İ, ı→I)."""
+    s = _str(s).replace("i", "İ").replace("ı", "I").upper().replace("Â", "A").replace("Î", "İ").replace("Û", "U")
+    return [TR_ALPHA.index(ch) for ch in s if ch in TR_ALPHA]
+
+
+def find_seats(text: str) -> List[List[str]]:
+    """Duyurudaki soyadı aralıkları ve salonları: [[alt, üst, salon], …]. En az iki satır olmalı, aralıklar
+    artan sırada ve çakışmasız olmalı; değilse (liste başka bir şeydir) boş döner."""
+    rows = [(m.group(1), m.group(2), m.group(3)) for m in RE_SEAT.finditer(text or "")]
+    rows += [(m.group(2), m.group(3), m.group(1)) for m in RE_SEAT_REV.finditer(text or "")]
+    out: List[List[str]] = []
+    last: Optional[List[int]] = None
+    for lo, hi, room in rows:
+        kl, kh, code = _tr_key(lo), _tr_key(hi), _rooms(room, "")
+        if not kl or not kh or not code or kl > kh or (last is not None and kl <= last):
+            return []
+        last = kh
+        out.append([lo.strip(), hi.strip(), code])
+    return out if len(out) >= 2 else []
+
+
+def seat_for(lastname: str, seats: Any) -> Optional[List[str]]:
+    """Soyadın düştüğü tek aralık ([alt, üst, salon]); hiçbirine ya da birden fazlasına düşüyorsa None."""
+    k = _tr_key(lastname)
+    hits = []
+    for row in seats if isinstance(seats, list) else []:
+        if not (isinstance(row, list) and len(row) == 3):
+            return None
+        lo, hi = _tr_key(row[0]), _tr_key(row[1])
+        if k and lo <= k and k[:len(hi)] <= hi:
+            hits.append(row)
+    return hits[0] if len(hits) == 1 else None
 
 
 def regex_dates(text: str, posted: Optional[int] = None, title: str = "", course: str = "") -> List[Dict[str, Any]]:
@@ -1326,6 +1383,10 @@ def regex_dates(text: str, posted: Optional[int] = None, title: str = "", course
                 place = find_place(text[a:b], course, text if best in ("midterm", "final", "quiz", "exam") else "")
                 if place:
                     found[key]["place"] = place
+    seats = find_seats(text)
+    exams = [ev for ev in found.values() if ev["type"] in ("midterm", "final", "quiz", "exam")]
+    if seats and len(exams) == 1:  # dağılımın hangi sınava ait olduğu ancak tek sınav varsa bellidir
+        exams[0]["seats"] = seats
     return list(found.values())
 
 
@@ -1420,6 +1481,13 @@ def _exact_slot(e: Dict[str, Any]) -> Optional[str]:
     return exam_slot({"type": typ, "title": title})
 
 
+def _carry_place(o: Dict[str, Any], e: Dict[str, Any]) -> None:
+    """Aynı olayın iki kaydı birleşirken yer bilgisi kaybolmasın."""
+    for k in ("place", "my_place", "my_range"):
+        if e.get(k):
+            o.setdefault(k, e[k])
+
+
 def merged_events(ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Aynı teslimin takvim/ödev/etkinlik kopyalarını tek kayda indirir; 'tarih' türündeki belirsiz
     metin eşleşmelerini (ofis saati vb.) listeden çıkarır."""
@@ -1439,10 +1507,9 @@ def merged_events(ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
         if sl and (e.get("course"), sl) in exact_slots:
             # Moodle'ın kendi kaydı (quiz modülü/takvim) metinden çıkan tarihten daha güvenilir;
             # ama yer bilgisi sadece duyuruda yazar, o kayda taşınır
-            if e.get("place"):
-                for o in out:
-                    if o.get("certainty") == "exact" and o["course"] == e.get("course") and _exact_slot(o) == sl:
-                        o.setdefault("place", e["place"])
+            for o in out:
+                if o.get("certainty") == "exact" and o["course"] == e.get("course") and _exact_slot(o) == sl:
+                    _carry_place(o, e)
             continue
         typ, day, item = e.get("type"), _display_dt(e)[0], str(e.get("item") or "")
         if typ in ("assignment", "project") and item.startswith(("assign:", "mod:", "cal:")):
@@ -1475,8 +1542,7 @@ def merged_events(ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
                 # aynı şey. Tek istisna: bir teslimle aynı güne düşen, SAATİ FARKLI itiraz oturumu / ders
                 # değişikliği ayrı bir olaydır (saatler aynıysa Moodle kaydı zaten o oturumdur: randevu modülü)
                 dup = True
-                if e.get("place"):
-                    o.setdefault("place", e["place"])
+                _carry_place(o, e)
                 break
         if not dup:
             out.append(dict(e))
@@ -1818,6 +1884,8 @@ def group_other(items: List[Dict[str, Any]], max_lines: int = 6) -> List[str]:
 
 def _place(e: Dict[str, Any]) -> str:
     """' · M100, M1170' — satırda zaten yazıyorsa (kısa duyuru cümlesi etiketin içindeyse) tekrarlanmaz."""
+    if e.get("my_place"):  # salonlar soyada göre dağıtılmış: kendi salonu, doğrulayabilmesi için aralığıyla
+        return f" · {E(e['my_place'])} (soyadına göre: {E(e.get('my_range') or '')})"
     rooms = [r for r in (e.get("place") or "").split(", ") if r]
     if not rooms or all(r in re.sub(r"(?<=[A-ZÇĞİÖŞÜ])[ -](?=\d)", "", _label(e)) for r in rooms):
         return ""

@@ -95,7 +95,10 @@ flowchart LR
 - An assignment called *"Midterm Project Report"* is a deadline, not an exam.
 - *"in M100 and M1170"*, *"at the BUFAIM Lab (M2142)"*, *"Yer: KB301"* are the exam's rooms; *"in IE202"* and
   *"at NOV 17"* are not.
+- *"…on 2nd of December (last week I mentioned 1st of December as the possible date, but…)"*: the date that is
+  only mentioned to explain the change is not a second exam.
 - When announcements disagree, the most recently posted one wins, and the brief shows ⚠️ with the old date.
+  A later reminder that repeats the new date does not bring the warning back.
 
 **Never send a wrong brief.** Errors are classified as permanent (a disabled Moodle feature: skip that section),
 transient (network, maintenance: abort without sending, retry later) or auth (bad token: notify the user once a day).
@@ -129,6 +132,12 @@ corrupted Moodle responses: a run must end with a brief or a clean "retry later"
 is sent must be valid Telegram HTML within the size limit. (The first run of each found real bugs: a character
 reference like `&#99999999;` in a post crashed the iPhone script, and an over-long line was cut in the middle of
 a `<b>` tag.)
+
+**Your room, not all the rooms.** When a post splits the rooms by surname (`AÇ – İNCEBOY: M1100`,
+`İPEK – ZELKA: M1170`), the brief shows the reader's own room, with the range so it can be checked:
+`· M1170 (soyadına göre: İPEK–ZELKA)`. Ranges are compared in Turkish alphabetical order (Ö sorts between O and P,
+İ after I). A surname outside every range, or inside two, gets no guess and all rooms are shown. The surname
+comes from Moodle at run time and is never written to the state or the archive.
 
 **Scheduling you can trust.** GitHub's built-in cron didn't fire at all on a new repo, so an external
 scheduler triggers the workflow. The script is idempotent (one brief per day, lock file, retries until noon),
@@ -170,7 +179,7 @@ nothing is sent. Set the repository variable (or `.env` line) `REMINDER_TIME=off
 ```bash
 pip install -r requirements.txt
 python demo.py      # fake Moodle, prints the brief
-pytest -q                     # 144 tests: date parsing, failure modes, grades, reminders, fuzz
+pytest -q                     # 149 tests: date parsing, failure modes, grades, reminders, fuzz
 python tests/parity/run.py    # Python vs. iPhone script on 5,600 generated cases (needs Node)
 for f in tests/ios/*.js; do node "$f"; done    # the iPhone port's own suites
 ```

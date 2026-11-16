@@ -285,3 +285,79 @@ def test_overlong_line_is_split_without_breaking_the_markup(env):
         assert "<" not in t and ">" not in t                         # markup dropped for that line, text kept
         assert not __import__("re").search(r"&(?!amp;)", t)          # no entity cut in half
     assert "".join(s["text"] for s in tg.sent).count("&amp;") == 301
+
+
+# ------------------------------------------------------------------ v1.7.1: found in the first evening of real use
+
+REMINDER_POST = ("Dear all,\n This is a reminder that the IE202 Midterm will be held on November 17 (tomorrow), from 17:00 to "
+                 "19:00 , in M1100 and M1170 .\n\n The classroom assignments are as follows, based on your surname:\n"
+                 " AÇ – İNCEBOY: M1100\n İPEK – ZELKA: M1170\n\n Please arrive 10 minutes before the exam begins .\n Best,\nTA")
+
+
+def test_superseded_date_in_a_remark_is_not_a_second_exam(mb):
+    """Real post: the old date is only mentioned to explain the change."""
+    text = ("The third exam of the semester will be held on 2nd of December, Wednesday from 17:00 to 19:00 (Last week I "
+            "mentioned 1st of December as the possible exam date, but had difficulty in finding exam rooms, so we shifted "
+            "1 day)\n There will be no lecture on the exam day")
+    assert [(e["type"], e["date"], e["time"]) for e in mb.regex_dates(text, NOW, "Exam No 3", "IE306")] == \
+        [("exam", "2026-12-02", "17:00")]
+    tr = "Final sınavı 12 Ocak Salı 10:00'da yapılacaktır, daha önce 11 Ocak demiştim."
+    assert [e["date"] for e in mb.regex_dates(tr, NOW, "", "IE306")] == ["2027-01-12"]
+    # a plain second date is still read
+    assert len(mb.regex_dates("Quiz 1 is on November 9. Quiz 2 is on November 23.", NOW, "", "IE306")) == 2
+
+
+def test_reminder_post_does_not_revive_an_old_date_change_warning(mb):
+    """The date moved weeks ago. A reminder repeating the (new) date is not a fresh change."""
+    evs = mb.supersede([
+        {"course": "IE202", "type": "midterm", "title": "midterm", "date": "2026-11-01", "posted": NOW - 40 * DAY},
+        {"course": "IE202", "type": "midterm", "title": "midterm", "date": "2026-11-17", "posted": NOW - 30 * DAY},
+        {"course": "IE202", "type": "midterm", "title": "midterm", "date": "2026-11-17", "posted": NOW - DAY}])
+    assert [e["date"] for e in evs] == ["2026-11-17"] and "changed_from" not in evs[0]
+    recent = mb.supersede([
+        {"course": "IE202", "type": "midterm", "title": "midterm", "date": "2026-11-01", "posted": NOW - 40 * DAY},
+        {"course": "IE202", "type": "midterm", "title": "midterm", "date": "2026-11-17", "posted": NOW - 2 * DAY}])
+    assert recent[0]["changed_from"] == "2026-11-01"
+
+
+def test_seat_ranges_are_read_in_turkish_alphabetical_order(mb):
+    seats = mb.find_seats(REMINDER_POST)
+    assert seats == [["AÇ", "İNCEBOY", "M1100"], ["İPEK", "ZELKA", "M1170"]]
+    room = lambda name: (mb.seat_for(name, seats) or [None, None, None])[2]
+    assert room("Özbey") == "M1170"            # Ö sorts between O and P, not after Z
+    assert room("Çelik") == "M1100" and room("Ilgaz") == "M1100" and room("İnce") == "M1100"
+    assert room("İpekçi") == "M1170" and room("şahin") == "M1170" and room("Zelkan") == "M1170"
+    assert room("Abak") is None and room("Zorlu") is None and room("") is None      # outside every range: no guess
+    assert mb.find_seats("M100: Abak - Çelik\nM1170: Demir - Öz\nM2171: Öztürk - Zorlu") == \
+        [["Abak", "Çelik", "M100"], ["Demir", "Öz", "M1170"], ["Öztürk", "Zorlu", "M2171"]]
+    # not seat lists
+    assert mb.find_seats("Monday - Friday: NH101\nA - C: NH102") == []              # not ascending
+    assert mb.find_seats("A – K: NH101") == []                                      # a single line proves nothing
+    assert mb.find_seats("A - M: NH101\nK - Z: NH102") == []                        # overlapping
+    assert mb.seat_for("Özbey", [["A", "Z", "M1"], ["B", "Y", "M2"]]) is None       # two matches: no guess
+
+
+def test_own_room_is_shown_when_rooms_are_split_by_surname(env, monkeypatch):
+    mb, moodle, tg = env
+    moodle.posts = [(101, 1, "Midterm Exam", REMINDER_POST.replace("November 17 (tomorrow)", "November 6 (tomorrow)"),
+                     NOW - 3600)]
+    wrap(mb, monkeypatch, moodle, lambda fn, p: (
+        {"userid": 7, "firstname": "Emir Eymen", "lastname": "Özbey", "fullname": "Emir Eymen Özbey"}
+        if fn == "core_webservice_get_site_info" else None))
+    run(mb, "run", "--scheduled")
+    assert "IE202 Ara sınav ❔ · 6 Kas Cum 17:00 · M1170 (soyadına göre: İPEK–ZELKA) (yarın)" in plain(tg.last)
+    at(mb, monkeypatch, 20, 7)
+    run(mb, "run", "--scheduled")
+    assert plain(tg.last).startswith("🌙 Yarın · 6 Kas Cuma\n• 17:00 IE202 Ara sınav ❔ · M1170 (soyadına göre: İPEK–ZELKA)")
+    # the surname is used in memory only
+    assert "Özbey" not in mb.STATE_FILE.read_text() and "Özbey" not in mb.ARCHIVE_FILE.read_text()
+
+
+def test_surname_outside_the_listed_ranges_gets_all_rooms(env, monkeypatch):
+    mb, moodle, tg = env
+    moodle.posts = [(101, 1, "Midterm Exam", REMINDER_POST.replace("November 17 (tomorrow)", "November 6 (tomorrow)"),
+                     NOW - 3600)]
+    wrap(mb, monkeypatch, moodle, lambda fn, p: (
+        {"userid": 7, "fullname": "Ali Abak"} if fn == "core_webservice_get_site_info" else None))
+    run(mb, "run")
+    assert "17:00 · M1100, M1170 (yarın)" in plain(tg.last) and "soyadına" not in tg.last

@@ -14,7 +14,7 @@ global.URLScheme = { forRunningScript: () => "x" }
     const { fn, args } = JSON.parse(line)
     try {
       let r
-      if (fn === "dates") r = A.regexDates(args[0], args[1], args[2], args[3] || "").map(e => [e.type, e.date, e.time, e.certainty, !!e.weekday_mismatch, e.title, e.place || null])
+      if (fn === "dates") r = A.regexDates(args[0], args[1], args[2], args[3] || "").map(e => [e.type, e.date, e.time, e.certainty, !!e.weekday_mismatch, e.title, e.place || null, e.seats || null])
       else if (fn === "gist") r = A.gist(args[0])
       else if (fn === "isExam") r = A.isExam(args[0])
       else if (fn === "slot") r = A.examSlot(args[0])
